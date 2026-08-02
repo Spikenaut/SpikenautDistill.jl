@@ -14,6 +14,32 @@
 - **Apply any rule**: The library provides a modular system for learning rules, starting with e-prop and OTTT. Researchers can easily add their own rules.
 - **Update only the SNN**: In hybrid systems, the library is designed to update only the SNN parameters, leaving any external teacher model frozen.
 
+## Scope and ownership boundaries
+
+`SynapticDistill.jl` provides modular online training for spiking neural networks in Julia. It is intentionally framework-agnostic.
+
+### Owns
+
+- Differentiable/online distillation and teacher-student knowledge transfer
+- E-prop, OTTT, and surrogate-gradient training rules
+- Gradient computation for spiking neurons
+- Training-loop utilities and callbacks
+
+### Does not own
+
+- Reward-modulated STDP or Hebbian learning
+- IPC wire protocol types
+- Domain-specific model architectures
+- Hardware-specific optimizations (unless generic)
+
+### Boundary with plasticity-lab (Linear LIM-25)
+
+- `SynapticDistill.jl` (Julia): differentiable or online distillation and teacher-student knowledge transfer.
+- [`plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (Rust): reward-modulated STDP / Hebbian plasticity rules and online low-level weight delta computation.
+- `SynapticDistill.jl` must not become the home for STDP logic; `plasticity-lab` must not absorb distillation logic.
+
+See the matching boundary note in the [`plasticity-lab` README](https://github.com/Limen-Neural/plasticity-lab#scope-and-ownership-boundaries) and the Linear issue [LIM-25](https://linear.app/rpd-34/issue/LIM-25/plasticity-lab-clarify-ownership-boundary-with-synapticdistilljl).
+
 ## Quick Start (Pure SNN Training)
 
 Here's a simple example of how to train an SNN using an injected model step and a standard loss function.
