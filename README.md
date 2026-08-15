@@ -94,12 +94,15 @@ loss_fn = output -> cross_entropy(output.logits, teacher_targets)
 model, state = train_step!(model, spike_batch, loss_fn; forward_fn=model_step, rule=:eprop)
 ```
 
-For a complete, runnable example, see [`examples/hybrid_moe_training.jl`](examples/hybrid_moe_training.jl).
+For a complete, runnable example, see [`examples/hybrid_teacher_training.jl`](examples/hybrid_teacher_training.jl).
 
 ## Available Rules
 
-- `:eprop`: Eligibility propagation.
-- `:ottt`: Online Spatio-Temporal Trace Training.
+- `:eprop`: Eligibility traces `y[t] = λ y[t-1] + pre[t]`, then `ΔW = (∂L/∂logits) ⊗ ȳ`. Applied to `model.weights`.
+- `:ottt`: Same pre-trace, accumulated per timestep (`ΔW ∝ ∑_t L ⊗ y[t]`).
+- `:surrogate`: Use Zygote grads through the injected model step (no trace).
+
+`train_step!` updates `model.weights` in place via SGD (`lr=0.001` by default). Pass `traces=state.traces` on the next tick to continue the leaky filter.
 
 ## Custom Model Steps and Loss Functions
 

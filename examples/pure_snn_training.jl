@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using SynapticDistill
+using LinearAlgebra
 using Statistics
 
 # 1. Define a simple SNN model.
@@ -23,18 +24,13 @@ function model_step(model, spikes::SpikeBatch)
     return (logits = model.weights * rates,)
 end
 
-# This function takes the model output and should return a scalar loss.
 function mse_loss(output)
-    # A real loss function would compare the output to a target.
-    # Here, we just return a dummy value.
     return sum(output.logits .^ 2)
 end
 
-# 5. Run a training step.
 println("Running a single training step...")
 model, state = train_step!(model, spike_batch, mse_loss; forward_fn=model_step, rule=:eprop)
 
 println("Training step complete.")
 println("Loss: ", state.loss)
-# In a real scenario, you would inspect the gradients and update the model.
-# println("Gradients: ", state.gradients)
+println("‖∇W‖: ", norm(state.gradients))

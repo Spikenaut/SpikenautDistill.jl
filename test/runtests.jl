@@ -3,6 +3,7 @@
 using Test
 using SynapticDistill
 using LinearAlgebra
+using Random
 using Statistics
 using Zygote
 
@@ -28,6 +29,8 @@ end
         @test isdefined(SynapticDistill, :TrainingState)
         @test isdefined(SynapticDistill, :ModelStep)
         @test isdefined(SynapticDistill, :train_step!)
+        @test isdefined(SynapticDistill, :update_eprop!)
+        @test isdefined(SynapticDistill, :update_ottt!)
         @test isdefined(SynapticDistill, :surrogate_heaviside)
         @test isdefined(SynapticDistill, :surrogate_sigmoid)
         @test isdefined(SynapticDistill, :surrogate_exponential)
@@ -73,21 +76,18 @@ end
         # rates = [2/3, 2/3]; logits = W * rates = [2, 14/3]; sum = 20/3
         expected_loss = 20.0f0 / 3.0f0
 
-        updated_model, state = redirect_stdout(devnull) do
-            train_step!(model, spikes, loss_fn; forward_fn=mock_step, rule=:eprop)
-        end
+        updated_model, state = train_step!(model, spikes, loss_fn; forward_fn=mock_step, rule=:eprop)
 
         @test updated_model === model
         @test calls[] == 1
         @test state.loss ≈ expected_loss
         @test state.gradients !== nothing
+        @test model.weights != Float32[1 2; 3 4]
 
         calls[] = 0
-        _, positional_state = redirect_stdout(devnull) do
-            train_step!(model, spikes, loss_fn, mock_step; rule=:ottt)
-        end
+        model2 = MockSNN(Float32[1 2; 3 4])
+        _, positional_state = train_step!(model2, spikes, loss_fn, mock_step; rule=:ottt)
         @test calls[] == 1
-        # Same mock forward+loss; rule only prints a stub message, so loss matches.
         @test positional_state.loss ≈ expected_loss
 
         @test_throws ArgumentError train_step!(model, spikes, loss_fn; rule=:eprop)
@@ -105,6 +105,62 @@ end
         end
         @test state.loss ≈ expected_loss
         @test state.gradients !== nothing
+    end
+
+    @testset "e-prop and OTTT update weights and cut loss" begin
+        Random.seed!(4)
+        n_pre, n_out, T = 6, 3, 32
+        W_true = Float32[0.8 0 0 0 0 0;
+                         0 0.8 0 0 0 0;
+                         0 0 0.8 0 0 0]
+        spikes_mat = zeros(Float32, n_pre, T)
+        spikes_mat[1, 1:2:T] .= 1
+        spikes_mat[2, 2:3:T] .= 1
+        spikes_mat[3, 1:4:T] .= 1
+        rates = vec(mean(spikes_mat; dims=2))
+        target = W_true * rates
+        batch = SpikeBatch(spikes_mat, nothing, target)
+
+        function rate_step(model, batch::SpikeBatch)
+            r = vec(mean(batch.spikes; dims=2))
+            return (logits = model.weights * r,)
+        end
+        loss_fn(output) = sum(abs2, output.logits .- target)
+        opt = SynapticDistill.default_optimizer(0.05f0)
+
+        function run_rule(rule)
+            model = MockSNN(0.01f0 .* randn(Float32, n_out, n_pre))
+            _, s0 = train_step!(model, batch, loss_fn; forward_fn=rate_step, rule=rule, optimizer=opt)
+            loss0 = s0.loss
+            W0 = copy(model.weights)
+            traces = s0.traces
+            local last = s0
+            for _ in 1:40
+                _, last = train_step!(model, batch, loss_fn;
+                                      forward_fn=rate_step, rule=rule,
+                                      optimizer=opt, traces=traces)
+                traces = last.traces
+            end
+            return loss0, last.loss, W0, copy(model.weights), last
+        end
+
+        for rule in (:eprop, :ottt)
+            loss0, loss1, W0, W1, last = run_rule(rule)
+            @test last.gradients isa AbstractMatrix
+            @test size(last.gradients) == (n_out, n_pre)
+            @test last.traces isa TraceBatch
+            @test W1 != W0
+            @test loss1 < loss0
+        end
+
+        model = MockSNN(randn(Float32, n_out, n_pre))
+        grads, tr = update_eprop!(model, batch, 1.0f0, (logits = zeros(Float32, n_out),);
+                                  loss_fn = loss_fn)
+        @test size(grads) == (n_out, n_pre)
+        @test tr.traces.rule === :eprop
+        grads2, _ = update_ottt!(model, batch, 1.0f0, (logits = zeros(Float32, n_out),);
+                                 loss_fn = loss_fn, traces=tr)
+        @test size(grads2) == (n_out, n_pre)
     end
 
 end
