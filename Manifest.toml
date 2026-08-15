@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.5"
+julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "f7bf0ad258e18d65f4891674f8cbc28fa865b409"
+project_hash = "2a6c830990ae47fdd557e669514ae1c0486cf8b4"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -704,12 +704,6 @@ weakdeps = ["ChainRulesCore"]
     [deps.SpecialFunctions.extensions]
     SpecialFunctionsChainRulesCoreExt = "ChainRulesCore"
 
-[[deps.SynapticDistill]]
-deps = ["LinearAlgebra", "MLUtils", "Printf", "Statistics", "Zygote"]
-path = "."
-uuid = "c4d8e2f3-9a0b-4c1d-8e5f-2a3b4c5d6e7f"
-version = "0.2.0"
-
 [[deps.SplittablesBase]]
 deps = ["Setfield", "Test"]
 git-tree-sha1 = "e08a62abc517eb79667d0a29dc08a3b589516bb5"
@@ -780,6 +774,12 @@ uuid = "4607b0f0-06f3-5cda-b6b1-a6196a1729e9"
 deps = ["Artifacts", "Libdl", "libblastrampoline_jll"]
 uuid = "bea87d4a-7f5b-5778-9afe-8cc45184846c"
 version = "7.8.3+2"
+
+[[deps.SynapticDistill]]
+deps = ["LinearAlgebra", "MLUtils", "Printf", "Statistics", "Zygote"]
+path = "."
+uuid = "c4d8e2f3-9a0b-4c1d-8e5f-2a3b4c5d6e7f"
+version = "0.2.0"
 
 [[deps.TOML]]
 deps = ["Dates"]
