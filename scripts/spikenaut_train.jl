@@ -331,12 +331,16 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
         bank.weights[i, :] .+= reward .* bank.elig[i, :] .* EPROP_LR
     end
 
-    # 7. 16×3 readout: predict (hint, temp, power) from this tick's spikes
+    # 7. 16×3 readout: predict (hint, temp, power) from this tick's spikes.
+    #    Plain supervised delta rule — NOT reward-modulated. `reward` is signed
+    #    and goes negative on exactly the thermal/power rows this readout must
+    #    predict, so scaling by it ascends the error and trains the map
+    #    backwards. Reward modulation belongs on the e-prop path above (step 6).
     if target !== nothing
         s = Float32.(bank.spikes)
         pred = bank.readout * s
         err = target .- pred
-        bank.readout .+= (READOUT_LR * reward) .* (err * s')
+        bank.readout .+= READOUT_LR .* (err * s')
     end
 
     # 8. Dale + signed L2 cap (do **not** divide rows by sum — that
