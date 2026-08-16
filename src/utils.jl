@@ -19,15 +19,38 @@ function _weight_grad(grads)
 end
 
 """
+    _spikes_as_matrix(s) -> AbstractMatrix
+
+Normalize the `SpikeBatch.spikes` representations documented in `types.jl` — an
+`AbstractMatrix` (sparse included) or a vector of equal-length vectors — to a
+matrix. Each inner vector becomes one column; `_spike_matrix` then settles the
+channel/time orientation.
+"""
+_spikes_as_matrix(s::AbstractMatrix) = s
+function _spikes_as_matrix(s::AbstractVector)
+    isempty(s) && throw(ArgumentError("SpikeBatch.spikes is empty"))
+    all(v -> v isa AbstractVector, s) || throw(ArgumentError(
+        "SpikeBatch.spikes must be an AbstractMatrix (channels × time) or a vector " *
+        "of equal-length vectors, got a vector of $(eltype(s))"))
+    n = length(first(s))
+    all(v -> length(v) == n, s) || throw(ArgumentError(
+        "SpikeBatch.spikes vector-of-vectors needs equal-length inner vectors, got " *
+        "lengths $(sort!(unique(map(length, s))))"))
+    return reduce(hcat, s)
+end
+_spikes_as_matrix(s) = throw(ArgumentError(
+    "SpikeBatch.spikes must be an AbstractMatrix (channels × time) or a vector of " *
+    "equal-length vectors, got $(typeof(s))"))
+
+"""
     _spike_matrix(batch, n_pre) -> AbstractMatrix
 
 `SpikeBatch.spikes` as `n_pre × T`. Rows are presynaptic channels matching
-`size(model.weights, 2)`. A `T × n_pre` layout is transposed.
+`size(model.weights, 2)`. A `T × n_pre` layout is transposed. Accepts both
+representations `types.jl` documents — see [`_spikes_as_matrix`](@ref).
 """
 function _spike_matrix(batch::SpikeBatch, n_pre::Integer)
-    s = batch.spikes
-    s isa AbstractMatrix || throw(ArgumentError(
-        "SpikeBatch.spikes must be an AbstractMatrix (channels × time), got $(typeof(s))"))
+    s = _spikes_as_matrix(batch.spikes)
     if size(s, 1) == n_pre
         return s
     elseif size(s, 2) == n_pre
@@ -45,10 +68,28 @@ function _as_f32_vec(x)
 end
 
 """
+    _logits_rebuilder(output) -> (z -> output′)
+
+Closure replacing `output.logits` with `z` while keeping every other property.
+
+`NamedTuple`s round-trip exactly. Any other type is rebuilt as a `NamedTuple` of
+its properties: the fields a `loss_fn` reads survive, but the concrete type does
+not, so a `loss_fn` dispatching on that type raises — and `_learning_signal`
+surfaces that rather than quietly optimizing a different objective.
+"""
+function _logits_rebuilder(output)
+    output isa NamedTuple && return z -> merge(output, (logits = z,))
+    props = propertynames(output)
+    base = NamedTuple{props}(map(p -> getproperty(output, p), props))
+    return z -> merge(base, (logits = z,))
+end
+
+"""
     _learning_signal(loss_fn, output, n_out) -> Vector{Float32}
 
-`∂L/∂logits` when `output` has `.logits`. Any other fields of `output` are
-carried through, so a `loss_fn` that reads them still works.
+`∂L/∂logits` when `output` has `.logits`. Any other properties of `output` are
+carried through, so a `loss_fn` that reads them still works — see
+[`_logits_rebuilder`](@ref) for the one case that cannot be preserved.
 
 Throws when `output` has `.logits` but the derivative is unavailable or the
 wrong length. `:eprop` / `:ottt` use this vector *as* the learning signal — the
@@ -60,7 +101,7 @@ function _learning_signal(loss_fn, output, n_out::Integer)
     (output === nothing || !hasproperty(output, :logits)) && return ones(Float32, n_out)
 
     z0 = _as_f32_vec(output.logits)
-    rebuild = output isa NamedTuple ? z -> merge(output, (logits = z,)) : z -> (logits = z,)
+    rebuild = _logits_rebuilder(output)
     g = try
         Zygote.gradient(z -> loss_fn(rebuild(z)), z0)[1]
     catch err
