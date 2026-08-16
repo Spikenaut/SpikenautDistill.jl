@@ -49,12 +49,23 @@ _spikes_as_matrix(s) = throw(ArgumentError(
 `SpikeBatch.spikes` as `n_pre × T`. Rows are presynaptic channels matching
 `size(model.weights, 2)`. A `T × n_pre` layout is transposed. Accepts both
 representations `types.jl` documents — see [`_spikes_as_matrix`](@ref).
+
+A square `n_pre × n_pre` batch is **rejected**: channel-major and time-major are
+indistinguishable at that shape, and guessing silently transposes the eligibility
+axes and corrupts the gradient direction. Reshape to an unambiguous `T`, or pass
+the canonical orientation explicitly.
 """
 function _spike_matrix(batch::SpikeBatch, n_pre::Integer)
     s = _spikes_as_matrix(batch.spikes)
-    if size(s, 1) == n_pre
+    nr, nc = size(s)
+    if nr == n_pre && nc == n_pre
+        throw(ArgumentError(
+            "SpikeBatch.spikes is square ($nr × $nc) with n_pre=$n_pre, so the " *
+            "channel/time orientation is ambiguous and picking one would silently " *
+            "transpose the traces. Pass a batch whose T differs from n_pre."))
+    elseif nr == n_pre
         return s
-    elseif size(s, 2) == n_pre
+    elseif nc == n_pre
         return permutedims(s)
     else
         throw(ArgumentError(
@@ -117,6 +128,43 @@ function _learning_signal(loss_fn, output, n_out::Integer)
     length(L) == n_out || throw(DimensionMismatch(
         "`∂L/∂logits` length $(length(L)) != n_out=$n_out"))
     return L
+end
+
+"""
+    _learning_signal_per_t(loss_fn, output, n_out, T) -> (Matrix{Float32}, Bool)
+
+Per-timestep `∂L/∂logits` as `n_out × T`, plus whether it is genuinely
+time-resolved.
+
+This is what separates OTTT from e-prop. When `output.logits` is an `n_out × T`
+matrix, the gradient is taken through the whole matrix, so column `t` is the
+learning signal *at* `t` and `∑ₜ L[:,t] ⊗ y[t]` cannot be refactored into
+`L ⊗ ȳ`. When `logits` is a single vector there is no per-timestep information
+to recover: the episode-level signal is broadcast across `T`, and OTTT
+necessarily collapses back onto e-prop. The returned `Bool` says which happened,
+so callers can tell a real per-timestep rule from the degenerate case.
+"""
+function _learning_signal_per_t(loss_fn, output, n_out::Integer, T::Integer)
+    if output !== nothing && hasproperty(output, :logits) && output.logits isa AbstractMatrix
+        Z = Float32.(output.logits)
+        size(Z, 1) == n_out || throw(DimensionMismatch(
+            "`output.logits` has $(size(Z, 1)) rows, expected n_out=$n_out"))
+        size(Z, 2) == T || throw(DimensionMismatch(
+            "per-timestep `output.logits` has $(size(Z, 2)) columns, expected T=$T"))
+        rebuild = _logits_rebuilder(output)
+        G = try
+            Zygote.gradient(z -> loss_fn(rebuild(z)), Z)[1]
+        catch err
+            throw(ArgumentError(
+                "could not differentiate `loss_fn` w.r.t. per-timestep " *
+                "`output.logits`: $(sprint(showerror, err))"))
+        end
+        G === nothing && throw(ArgumentError(
+            "`loss_fn` has no derivative w.r.t. per-timestep `output.logits`"))
+        return Float32.(G), true
+    end
+    L = _learning_signal(loss_fn, output, n_out)
+    return repeat(L, 1, max(T, 0)), false
 end
 
 """

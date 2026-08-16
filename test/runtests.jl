@@ -185,4 +185,53 @@ end
         @test size(grads2) == (2, 3)
     end
 
+    @testset "OTTT is per-timestep, not a rename of e-prop" begin
+        Random.seed!(3)
+        n_pre, n_out, T = 6, 3, 8
+        S = Float32.(rand(0:1, n_pre, T))
+        batch = SpikeBatch(S, nothing, nothing)
+        model = MockSNN(0.1f0 .* randn(Float32, n_out, n_pre))
+
+        # `n_out × T` logits + a loss that weights timesteps differently, so
+        # ∂L/∂logits genuinely varies with t.
+        w = Float32.(collect(1:T))
+        out_mat = (logits = randn(Float32, n_out, T),)
+        loss_mat = o -> sum(sum(abs2, o.logits; dims=1)[:] .* w)
+        g_ottt, tr = update_ottt!(model, batch, 1.0f0, out_mat; loss_fn = loss_mat)
+        @test tr.traces.time_resolved
+        @test size(g_ottt) == (n_out, n_pre)
+
+        out_vec = (logits = vec(sum(out_mat.logits; dims=2)),)
+        loss_vec = o -> sum(abs2, o.logits)
+        g_ep, _ = update_eprop!(model, batch, 1.0f0, out_vec; loss_fn = loss_vec)
+
+        # The whole point: a time-resolved signal cannot be refactored into L ⊗ ȳ.
+        @test !isapprox(g_ottt, g_ep; rtol = 1f-3)
+
+        # A vector `logits` carries no per-timestep information, so OTTT must
+        # collapse back onto e-prop exactly — and say so.
+        g_deg, tr_deg = update_ottt!(model, batch, 1.0f0, out_vec; loss_fn = loss_vec)
+        @test !tr_deg.traces.time_resolved
+        @test isapprox(g_deg, g_ep; rtol = 1f-5)
+
+        # Wrong column count is a clear error, not a silent broadcast.
+        bad = (logits = randn(Float32, n_out, T + 1),)
+        @test_throws DimensionMismatch update_ottt!(model, batch, 1.0f0, bad;
+                                                    loss_fn = loss_mat)
+    end
+
+    @testset "ambiguous square spike layout is rejected" begin
+        model = MockSNN(randn(Float32, 2, 4))
+        square = SpikeBatch(Float32.(rand(0:1, 4, 4)), nothing, nothing)
+        @test_throws ArgumentError SynapticDistill._spike_matrix(square, 4)
+        @test_throws ArgumentError update_eprop!(model, square, 1.0f0,
+                                                 (logits = zeros(Float32, 2),))
+
+        # Non-square stays unambiguous in both orientations.
+        @test size(SynapticDistill._spike_matrix(
+            SpikeBatch(Float32.(rand(0:1, 4, 7)), nothing, nothing), 4)) == (4, 7)
+        @test size(SynapticDistill._spike_matrix(
+            SpikeBatch(Float32.(rand(0:1, 7, 4)), nothing, nothing), 4)) == (4, 7)
+    end
+
 end

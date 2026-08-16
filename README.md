@@ -99,7 +99,12 @@ For a complete, runnable example, see [`examples/hybrid_teacher_training.jl`](ex
 ## Available Rules
 
 - `:eprop`: Eligibility traces `y[t] = λ y[t-1] + pre[t]`, then `ΔW = (∂L/∂logits) ⊗ ȳ`. Applied to `model.weights`.
-- `:ottt`: Same pre-trace, accumulated per timestep (`ΔW ∝ ∑_t L ⊗ y[t]`).
+- `:ottt`: Same pre-trace, paired with a **per-timestep** learning signal
+  (`ΔW ∝ ∑_t (∂L/∂logits)[t] ⊗ y[t]`). To get a rule that actually differs from
+  e-prop, the model step must emit `output.logits` as an `n_out × T` matrix — a
+  single episode-level signal factors out as `L ⊗ ȳ`, which *is* e-prop. A
+  vector `logits` still works but degenerates; `state.traces.traces.time_resolved`
+  reports which case ran.
 - `:surrogate`: Use Zygote grads through the injected model step (no trace).
 
 `train_step!` updates `model.weights` in place via SGD (`lr=0.001` by default). Pass `traces=state.traces` on the next tick to continue the leaky filter.
