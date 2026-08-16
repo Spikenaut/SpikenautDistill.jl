@@ -24,8 +24,9 @@ Plain `Function`s and other callable objects are also accepted by `train_step!`.
 """
 abstract type ModelStep end
 
-function default_optimizer(lr::Float32 = 0.001f0)
-    return (params, grads) -> params .-= lr .* grads
+function default_optimizer(lr::Real = 0.001f0)
+    lr32 = Float32(lr)
+    return (params, grads) -> params .-= lr32 .* grads
 end
 
 """

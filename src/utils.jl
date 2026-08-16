@@ -47,31 +47,49 @@ end
 """
     _learning_signal(loss_fn, output, n_out) -> Vector{Float32}
 
-`∂L/∂logits` when `output` has `.logits`; otherwise a uniform signal of
-length `n_out` (still signed by `loss` via the caller’s Zygote path).
+`∂L/∂logits` when `output` has `.logits`. Any other fields of `output` are
+carried through, so a `loss_fn` that reads them still works.
+
+Throws when `output` has `.logits` but the derivative is unavailable or the
+wrong length. `:eprop` / `:ottt` use this vector *as* the learning signal — the
+Zygote path in `train_step!` only feeds `:surrogate` — so falling back to a
+uniform signal there would apply an unsigned update unrelated to `loss`. The
+uniform signal is used only when `output` carries no `.logits` at all.
 """
 function _learning_signal(loss_fn, output, n_out::Integer)
-    if output !== nothing && hasproperty(output, :logits)
-        z0 = Float32.(_as_f32_vec(output.logits))
-        g = try
-            Zygote.gradient(z -> loss_fn((logits = z,)), z0)[1]
-        catch
-            nothing
-        end
-        if g !== nothing
-            L = _as_f32_vec(g)
-            length(L) == n_out && return L
-        end
+    (output === nothing || !hasproperty(output, :logits)) && return ones(Float32, n_out)
+
+    z0 = _as_f32_vec(output.logits)
+    rebuild = output isa NamedTuple ? z -> merge(output, (logits = z,)) : z -> (logits = z,)
+    g = try
+        Zygote.gradient(z -> loss_fn(rebuild(z)), z0)[1]
+    catch err
+        throw(ArgumentError(
+            "could not differentiate `loss_fn` w.r.t. `output.logits`: " *
+            "$(sprint(showerror, err)); e-prop / OTTT need `∂L/∂logits`"))
     end
-    return ones(Float32, n_out)
+    g === nothing && throw(ArgumentError(
+        "`loss_fn` has no derivative w.r.t. `output.logits`; " *
+        "e-prop / OTTT need a non-`nothing` `∂L/∂logits`"))
+    L = _as_f32_vec(g)
+    length(L) == n_out || throw(DimensionMismatch(
+        "`∂L/∂logits` length $(length(L)) != n_out=$n_out"))
+    return L
 end
 
 """
     _presynaptic_traces(S, λ, carry) -> (final_trace, time_mean, per_t)
 
 Leaky pre-trace `y[t] = λ y[t-1] + S[:, t]` over an `n_pre × T` spike matrix.
+
+`λ` must be finite and in `[0, 1)`: the `1 - λ` rate scaling below makes every
+gradient identically zero at `λ == 1`, and negative — i.e. gradient *ascent* —
+above it.
 """
 function _presynaptic_traces(S::AbstractMatrix, λ::Float32, carry::Union{Nothing,AbstractVector})
+    isfinite(λ) && 0f0 <= λ < 1f0 || throw(ArgumentError(
+        "trace_lambda must be finite and in [0, 1), got $λ; " *
+        "λ = 1 zeroes every gradient and λ > 1 inverts the update direction"))
     n_pre, T = size(S)
     y = carry === nothing ? zeros(Float32, n_pre) : Float32.(copy(carry))
     length(y) == n_pre || throw(ArgumentError(
