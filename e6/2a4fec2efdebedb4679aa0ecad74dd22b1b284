@@ -1,0 +1,22 @@
+src/utils.jl
+  s_d64e8387e1d5f3::t_98fdd9e12978f4 50-57,60-69,71-77
+  s_d64e8387e1d5f3::t_657e67ed1eab17 84-87,90-92
+src/training.jl
+  s_d64e8387e1d5f3::t_4d6d2b90cc1b7a 27-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e62a4fec2efdebedb4679aa0ecad74dd22b1b284",
+  "prompts": {},
+  "sessions": {
+    "s_d64e8387e1d5f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "518b14cd-d925-429c-8065-1b8826f8e114",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
