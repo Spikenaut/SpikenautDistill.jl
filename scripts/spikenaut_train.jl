@@ -598,10 +598,10 @@ function main(args=ARGS)
         w_std  = std(bank.weights)
         w_min  = minimum(bank.weights)
         w_max  = maximum(bank.weights)
-        n_inh  = count(i -> all(<=(0), view(bank.weights, i, :)), INHIB_ROWS)
+        n_inh  = count(i -> all(<=(0), view(bank.readout, :, i)), INHIB_ROWS)
         ms_tick = elapsed * 1000 / n
 
-        @printf("Epoch %3d/%d | reward=%+.4f | spike_rate=%.3f | max_spk=%d | w=%+.4f±%.4f [%+.3f,%+.3f] | inhib_rows=%d | %.3fms/tick\n",
+        @printf("Epoch %3d/%d | reward=%+.4f | spike_rate=%.3f | max_spk=%d | w=%+.4f±%.4f [%+.3f,%+.3f] | inhib_cols=%d | %.3fms/tick\n",
                 epoch, epochs, avg_r, s_rate, max_spikes, w_mean, w_std, w_min, w_max, n_inh, ms_tick)
     end
 
