@@ -50,15 +50,16 @@ _spikes_as_matrix(s) = throw(ArgumentError(
 `size(model.weights, 2)`. A `T × n_pre` layout is transposed. Accepts both
 representations `types.jl` documents — see [`_spikes_as_matrix`](@ref).
 
-A square `n_pre × n_pre` batch is **rejected**: channel-major and time-major are
-indistinguishable at that shape, and guessing silently transposes the eligibility
-axes and corrupts the gradient direction. Reshape to an unambiguous `T`, or pass
-the canonical orientation explicitly.
+A square `n_pre × n_pre` batch with `n_pre > 1` is **rejected**: channel-major
+and time-major are indistinguishable at that shape, and guessing silently
+transposes the eligibility axes and corrupts the gradient direction. A `1 × 1`
+batch is unambiguous (`permutedims` is a no-op) and is accepted. Otherwise
+reshape to an unambiguous `T`, or pass the canonical orientation explicitly.
 """
 function _spike_matrix(batch::SpikeBatch, n_pre::Integer)
     s = _spikes_as_matrix(batch.spikes)
     nr, nc = size(s)
-    if nr == n_pre && nc == n_pre
+    if nr == n_pre && nc == n_pre && n_pre > 1
         throw(ArgumentError(
             "SpikeBatch.spikes is square ($nr × $nc) with n_pre=$n_pre, so the " *
             "channel/time orientation is ambiguous and picking one would silently " *

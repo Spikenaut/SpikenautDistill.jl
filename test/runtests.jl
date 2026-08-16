@@ -232,6 +232,15 @@ end
             SpikeBatch(Float32.(rand(0:1, 4, 7)), nothing, nothing), 4)) == (4, 7)
         @test size(SynapticDistill._spike_matrix(
             SpikeBatch(Float32.(rand(0:1, 7, 4)), nothing, nothing), 4)) == (4, 7)
+
+        # 1×1 is unambiguous: permutedims is a no-op, so both layouts coincide.
+        one = SpikeBatch(reshape(Float32[1], 1, 1), nothing, nothing)
+        @test SynapticDistill._spike_matrix(one, 1) == reshape(Float32[1], 1, 1)
+        @test size(SynapticDistill._spike_matrix(
+            SpikeBatch([[1.0f0]], nothing, nothing), 1)) == (1, 1)
+        model1 = MockSNN(reshape(Float32[0.5], 1, 1))
+        grads1, _ = update_eprop!(model1, one, 1.0f0, (logits = zeros(Float32, 1),))
+        @test size(grads1) == (1, 1)
     end
 
 end
