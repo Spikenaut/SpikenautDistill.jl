@@ -535,7 +535,14 @@ function main(args=ARGS)
         total_spikes = 0
         max_spikes   = 0
 
+        # Every piece of per-tick temporal state resets together. Clearing only
+        # `v` and the encoder left `pre_tr`/`elig`/`spikes` carrying the tail of
+        # the previous replay, so epoch 2+ opened with neutral encoder deltas but
+        # stale eligibility — making multi-epoch weights depend on that leak.
         fill!(bank.v, 0f0)
+        fill!(bank.pre_tr, 0f0)
+        fill!(bank.elig, 0f0)
+        fill!(bank.spikes, false)
         enc.initialized = false
 
         t0 = time()

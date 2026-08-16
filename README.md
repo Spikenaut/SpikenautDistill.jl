@@ -93,7 +93,7 @@ not a dependency of the package itself — run it with `--project=scripts`, not
 julia --project=scripts -e 'using Pkg; Pkg.instantiate()'   # once
 
 julia --project=scripts scripts/spikenaut_train.jl \
-  /home/raulmc/Spikenaut-Vault/Spikenaut-SNN-Telemetry/full_data/qubic_ticks_snn.jsonl \
+  /path/to/qubic_ticks_snn.jsonl \
   20 /tmp/spikenaut-out
 ```
 
