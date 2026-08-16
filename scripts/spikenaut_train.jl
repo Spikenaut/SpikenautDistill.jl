@@ -244,10 +244,15 @@ function sample_reward(sample)::Float32
 end
 
 function sample_readout_target(sample)::Vector{Float32}
+    # Defaults must match `raw_telemetry`, which is what fills the input
+    # channels. They used to disagree (THERMAL_COMFORT_C / POWER_BUDGET_W here
+    # vs TEMP_MIN / POWER_MIN there), so a row missing `power_w_derived` fed the
+    # net channel 4 == 0.0 while asking the readout to predict 0.8 — training it
+    # against a value its own input contradicts.
     hint  = rec_f32(sample, 0.5f0,
                     :reward_hint_derived, :reward, :target_reward, :reward_hint)
-    temp  = rec_f32(sample, THERMAL_COMFORT_C, :gpu_temp_c_derived)
-    power = rec_f32(sample, POWER_BUDGET_W, :power_w_derived)
+    temp  = rec_f32(sample, TEMP_MIN, :gpu_temp_c_derived)
+    power = rec_f32(sample, POWER_MIN, :power_w_derived)
     return Float32[
         _unit01(hint),
         _unit01((temp - TEMP_MIN) / TEMP_SPAN),
