@@ -224,6 +224,22 @@ end
                 @test occursin("00D9", decay_hex) || occursin("00DA", decay_hex)
                 out_hex = read(joinpath(dir, "parameters_output_weights.mem"), String)
                 @test occursin(r"^[0-9A-F]{4}$"m, out_hex)
+
+                # Emission ORDER, not just line count. Both memories are
+                # neuron-major with the second index varying fastest. Line
+                # counts alone cannot catch a transposed write, and a
+                # column-major generator silently produces exactly that.
+                wlines = readlines(joinpath(dir, "parameters_weights.mem"))
+                @test wlines[1] == q88_signed(bank.weights[1, 1])
+                @test wlines[2] == q88_signed(bank.weights[1, 2])
+                @test wlines[N_CHANNELS + 1] == q88_signed(bank.weights[2, 1])
+                @test wlines[end] == q88_signed(bank.weights[N_NEURONS, N_CHANNELS])
+
+                olines = readlines(joinpath(dir, "parameters_output_weights.mem"))
+                @test olines[1] == q88_signed(bank.readout[1, 1])
+                @test olines[2] == q88_signed(bank.readout[2, 1])
+                @test olines[N_OUTPUTS + 1] == q88_signed(bank.readout[1, 2])
+                @test olines[end] == q88_signed(bank.readout[N_OUTPUTS, N_NEURONS])
                 # Signed encoder must be able to emit FFF9 (regression vs unsigned clamp).
                 @test q88_signed(-7 / 256) == "FFF9"
                 model = read(joinpath(dir, "snn_model.json"), String)

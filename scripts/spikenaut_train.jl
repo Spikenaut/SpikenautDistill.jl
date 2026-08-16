@@ -510,18 +510,16 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
     end
 
     write_mem(joinpath(out_dir, "parameters.mem"), bank.thresh)
-    open(joinpath(out_dir, "parameters_weights.mem"), "w") do f
-        for i in 1:N_NEURONS, ch in 1:N_CHANNELS
-            println(f, q88_signed(bank.weights[i, ch]))
-        end
-    end
+    # NOTE the chained `for i ... for ch ...`, not the comma form. A comma
+    # generator is a cartesian product and iterates column-major (i fastest),
+    # which would silently reorder these memories; the nested `for` loop this
+    # replaced varies the *last* index fastest. Verified byte-identical.
+    write_mem(joinpath(out_dir, "parameters_weights.mem"),
+              (bank.weights[i, ch] for i in 1:N_NEURONS for ch in 1:N_CHANNELS))
     write_mem(joinpath(out_dir, "parameters_decay.mem"), bank.decay)
     # 48 signed values, neuron-major: 16 neurons × 3 readout heads
-    open(joinpath(out_dir, "parameters_output_weights.mem"), "w") do f
-        for i in 1:N_NEURONS, o in 1:N_OUTPUTS
-            println(f, q88_signed(bank.readout[o, i]))
-        end
-    end
+    write_mem(joinpath(out_dir, "parameters_output_weights.mem"),
+              (bank.readout[o, i] for i in 1:N_NEURONS for o in 1:N_OUTPUTS))
 
     return (
         joinpath(out_dir, "snn_model.json"),
