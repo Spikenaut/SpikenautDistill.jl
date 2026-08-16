@@ -65,19 +65,36 @@ mutable struct LIFBank
     readout  ::Matrix{Float32}   # [N_OUTPUTS × N_NEURONS]
 end
 
+"""
+    init_hidden_weights() -> Matrix{Float32}
+
+Incoming weights, `N_NEURONS × N_CHANNELS`. Every neuron — excitatory and
+inhibitory alike — gets the same mildly-positive random drive, so all 16 can
+reach threshold. The E/I distinction lives on the outgoing side; see
+[`apply_dale_out!`](@ref).
+"""
 function init_hidden_weights()
-    W = randn(Float32, N_NEURONS, N_CHANNELS) .* 0.08f0
-    @inbounds for i in 1:N_EXC
-        for j in 1:N_CHANNELS
-            W[i, j] = abs(W[i, j]) + 0.04f0
+    return randn(Float32, N_NEURONS, N_CHANNELS) .* 0.08f0 .+ 0.04f0
+end
+
+"""
+    init_readout() -> Matrix{Float32}
+
+Outgoing weights, `N_OUTPUTS × N_NEURONS`. Column `i` is neuron `i`'s
+projection, sign-structured by Dale: excitatory columns non-negative,
+inhibitory columns non-positive.
+"""
+function init_readout()
+    R = randn(Float32, N_OUTPUTS, N_NEURONS) .* 0.05f0
+    @inbounds for o in 1:N_OUTPUTS
+        for i in 1:N_EXC
+            R[o, i] = abs(R[o, i])
+        end
+        for i in INHIB_ROWS
+            R[o, i] = -abs(R[o, i])
         end
     end
-    @inbounds for i in INHIB_ROWS
-        for j in 1:N_CHANNELS
-            W[i, j] = -abs(W[i, j]) - 0.04f0
-        end
-    end
-    return W
+    return R
 end
 
 function LIFBank()
@@ -89,7 +106,7 @@ function LIFBank()
         falses(N_NEURONS),
         zeros(Float32, N_CHANNELS),
         zeros(Float32, N_NEURONS, N_CHANNELS),
-        randn(Float32, N_OUTPUTS, N_NEURONS) .* 0.05f0,
+        init_readout(),
     )
 end
 
@@ -281,18 +298,31 @@ function apply_kwta!(spikes::AbstractVector{Bool}, v::AbstractVector, k::Int)
     return spikes
 end
 
-function apply_dale!(W::AbstractMatrix)
-    @inbounds for i in 1:N_EXC
-        for j in 1:size(W, 2)
-            W[i, j] < 0 && (W[i, j] = 0f0)
+"""
+    apply_dale_out!(R) -> R
+
+Dale's law on **outgoing** weights: column `i` of the readout holds neuron `i`'s
+projections, so excitatory neurons are constrained non-negative there and
+inhibitory neurons non-positive.
+
+This used to constrain the *incoming* `bank.weights` rows instead, which is both
+backwards — a neuron is excitatory or inhibitory by what it does to its targets,
+not by what it receives — and fatal: with inhibitory rows clipped to ≤ 0 and
+`stim` non-negative, rows 13:16 could only integrate downward and never reached
+the +1 threshold. Measured over 4000 ticks they fired 0 times, membrane resting
+near −30, so K-WTA could never select them and the exported "E/I" model had no
+inhibition in it at all.
+"""
+function apply_dale_out!(R::AbstractMatrix)
+    @inbounds for o in 1:size(R, 1)
+        for i in 1:N_EXC
+            R[o, i] < 0 && (R[o, i] = 0f0)
+        end
+        for i in INHIB_ROWS
+            R[o, i] > 0 && (R[o, i] = 0f0)
         end
     end
-    @inbounds for i in INHIB_ROWS
-        for j in 1:size(W, 2)
-            W[i, j] > 0 && (W[i, j] = 0f0)
-        end
-    end
-    return W
+    return R
 end
 
 function scale_rows_l2!(W::AbstractMatrix, cap::Float32)
@@ -350,14 +380,15 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
         pred = bank.readout * s
         err = target .- pred
         bank.readout .+= READOUT_LR .* (err * s')
+        apply_dale_out!(bank.readout)
     end
 
-    # 8. Dale + signed L2 cap (do **not** divide rows by sum — that
-    #    destroyed sign and collapsed every row onto the same simplex).
-    apply_dale!(bank.weights)
+    # 8. Signed L2 cap on incoming weights (do **not** divide rows by sum — that
+    #    destroyed sign and collapsed every row onto the same simplex). Incoming
+    #    weights carry no E/I sign constraint: Dale lives on the outgoing side,
+    #    in step 7, so every neuron can be driven to threshold.
     scale_rows_l2!(bank.weights, ROW_L2_CAP)
     clamp!(bank.weights, W_MIN, W_MAX)
-    apply_dale!(bank.weights)
 
     sum(bank.spikes)
 end
@@ -468,6 +499,9 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
             "neurons"        => neurons_json,
             "source"         => "spikenaut_julia",
             "ei_ratio"       => "80:20",
+            # E/I sign lives on each neuron's outgoing projection
+            # (`output_weights`), not on its incoming `weights` row.
+            "dale"           => "outgoing",
             "k_wta"          => K_WTA,
             "q88"            => "signed",
             "decay_semantics"=> "keep",

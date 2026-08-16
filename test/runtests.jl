@@ -184,20 +184,31 @@ end
         @testset "K-WTA + Dale + mixed-sign export" begin
             Random.seed!(29)
             bank = LIFBank()
-            @test all(>=(0), bank.weights[1:N_EXC, :])
-            @test all(<=(0), bank.weights[INHIB_ROWS, :])
+            # Dale lives on OUTGOING weights: readout column i is neuron i's
+            # projection. Incoming weights carry no sign constraint, which is
+            # what lets inhibitory neurons be driven to threshold at all.
+            @test all(>=(0), bank.readout[:, 1:N_EXC])
+            @test all(<=(0), bank.readout[:, INHIB_ROWS])
 
             stim = fill(0.95f0, N_CHANNELS)
             nspk = tick!(bank, stim, 0.4f0, Float32[0.8, 0.6, 0.7])
             @test nspk <= K_WTA
             @test count(bank.spikes) <= K_WTA
 
-            # Drive LTD + signed reward so inhibitory rows stay non-positive.
-            for _ in 1:80
+            # Drive LTD + signed reward; Dale must hold on the readout throughout.
+            inhib_spikes = 0
+            for _ in 1:400
                 tick!(bank, rand(Float32, N_CHANNELS), randn(Float32), rand(Float32, 3))
+                inhib_spikes += count(bank.spikes[INHIB_ROWS])
             end
-            @test all(>=(0), bank.weights[1:N_EXC, :])
-            @test all(<=(0), bank.weights[INHIB_ROWS, :])
+            @test all(>=(0), bank.readout[:, 1:N_EXC])
+            @test all(<=(0), bank.readout[:, INHIB_ROWS])
+
+            # The regression this change exists for: with Dale on incoming
+            # weights, rows 13:16 sat near -30 against a +1 threshold and fired
+            # exactly 0 times, so the exported "E/I" model had no inhibition.
+            @test inhib_spikes > 0
+
             @test minimum(bank.weights) < 0 < maximum(bank.weights)
             @test std(bank.weights) > 0.01f0
 
