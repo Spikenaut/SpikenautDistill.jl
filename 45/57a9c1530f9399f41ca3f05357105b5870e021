@@ -1,0 +1,21 @@
+test/runtests.jl
+  s_d64e8387e1d5f3::t_7bade01d4900e1 161-168
+scripts/spikenaut_train.jl
+  s_d64e8387e1d5f3::t_87aa8f11febbfc 181-184,186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4557a9c1530f9399f41ca3f05357105b5870e021",
+  "prompts": {},
+  "sessions": {
+    "s_d64e8387e1d5f3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "518b14cd-d925-429c-8065-1b8826f8e114",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
