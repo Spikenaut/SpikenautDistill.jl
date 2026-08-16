@@ -178,8 +178,12 @@ function to_stimuli(sample, enc::Union{StimEncoder,Nothing}=nothing)
     )
 
     cur = raw_telemetry(sample)
+    # `copy` is load-bearing: `enc.prev .= cur` below mutates in place, so
+    # binding `prev` to `enc.prev` would alias it and every delta channel
+    # would read `cur - cur`. On the first tick `prev === cur` is intended —
+    # no history yet, so deltas start neutral.
     prev = if enc !== nothing && enc.initialized
-        enc.prev
+        copy(enc.prev)
     else
         cur
     end

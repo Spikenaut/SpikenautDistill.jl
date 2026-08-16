@@ -158,6 +158,14 @@ end
             s2 = to_stimuli(rec2, enc)
             @test s1 != s2
 
+            # Delta channels must actually track history. `s1 != s2` alone
+            # passes on the level channels even when `prev` aliases `enc.prev`
+            # and every delta reads `cur - cur`.
+            @test all(≈(0.5f0), s1[7:11])   # first tick: no history, neutral
+            @test s1[14] == 0f0
+            @test s2[9] < 0.5f0             # hashrate 1.812 -> 1.0, so down
+            @test s2[14] > 0f0              # hash_drop registers the fall
+
             fixture = joinpath(@__DIR__, "fixtures", "qubic_ticks_snn_head.jsonl")
             rows = load_jsonl(fixture)
             @test length(rows) == 4
