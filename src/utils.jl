@@ -36,7 +36,8 @@ function _spikes_as_matrix(s::AbstractVector)
     all(v -> length(v) == n, s) || throw(ArgumentError(
         "SpikeBatch.spikes vector-of-vectors needs equal-length inner vectors, got " *
         "lengths $(sort!(unique(map(length, s))))"))
-    return reduce(hcat, s)
+    # `reduce(hcat, ·)` on a length-1 `Vector{Any}` returns the inner vector.
+    return hcat(s...)
 end
 _spikes_as_matrix(s) = throw(ArgumentError(
     "SpikeBatch.spikes must be an AbstractMatrix (channels × time) or a vector of " *

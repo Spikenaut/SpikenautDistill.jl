@@ -163,4 +163,26 @@ end
         @test size(grads2) == (n_out, n_pre)
     end
 
+    @testset "single-tick vector-of-vectors spikes" begin
+        # `push!` into `[]` yields `Vector{Any}`; generic `reduce(hcat, ·)` would
+        # return the inner vector instead of an `n_pre × 1` matrix.
+        tick = Any[]
+        push!(tick, Float32[1, 0, 1])
+        S = SynapticDistill._spikes_as_matrix(tick)
+        @test S isa AbstractMatrix
+        @test size(S) == (3, 1)
+        @test S == reshape(Float32[1, 0, 1], 3, 1)
+
+        model = MockSNN(Float32[0.1 0.2 0.3; 0.4 0.5 0.6])
+        batch = SpikeBatch(tick, nothing, nothing)
+        output = (logits = zeros(Float32, 2),)
+        grads, tr = update_eprop!(model, batch, 1.0f0, output)
+        @test size(grads) == (2, 3)
+        @test tr isa TraceBatch
+
+        batch2 = SpikeBatch(Any[Float32[0, 1, 0]], nothing, nothing)
+        grads2, _ = update_ottt!(model, batch2, 1.0f0, output; traces=tr)
+        @test size(grads2) == (2, 3)
+    end
+
 end
