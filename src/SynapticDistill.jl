@@ -25,6 +25,7 @@ include("rules/surrogate.jl")
 include("rules/eprop.jl")
 include("rules/ottt.jl")
 export surrogate_heaviside, surrogate_sigmoid, surrogate_exponential
+export update_eprop!, update_ottt!
 
 # Main training loop
 include("training.jl")
