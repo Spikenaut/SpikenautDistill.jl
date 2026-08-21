@@ -1,0 +1,4 @@
+{"timestamp":"2026-03-20T08:55:24+00:00","tick":46538099,"tick_rate":0.4333,"qubic_tick_trace":0.0,"hashrate_mh_derived":1.812488,"power_w_derived":381.248828,"gpu_temp_c_derived":72.187324,"reward_hint_derived":0.812488}
+{"timestamp":"2026-03-20T08:55:25+00:00","tick":46538101,"tick_rate":0.4667,"qubic_tick_trace":1.6651402880692698e-05,"hashrate_mh_derived":1.875117,"power_w_derived":387.511719,"gpu_temp_c_derived":73.126758,"reward_hint_derived":0.875117}
+{"timestamp":"2026-03-20T08:55:26+00:00","tick":46538103,"tick_rate":0.5,"qubic_tick_trace":0.02,"hashrate_mh_derived":1.2,"power_w_derived":395.0,"gpu_temp_c_derived":74.5,"reward_hint_derived":0.2}
+{"timestamp":"2026-03-20T08:55:27+00:00","tick":46538105,"tick_rate":0.1,"qubic_tick_trace":0.9,"hashrate_mh_derived":1.0,"power_w_derived":400.0,"gpu_temp_c_derived":75.0,"reward_hint_derived":0.0}

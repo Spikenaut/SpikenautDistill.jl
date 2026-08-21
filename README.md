@@ -107,6 +107,24 @@ A `ModelStep` is any callable object with signature `(model, spikes::SpikeBatch)
 
 Any function that takes that output and returns a scalar loss is a valid loss function.
 
+## Spikenaut sidecar (`scripts/spikenaut_train.jl`)
+
+Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files consumed by [rmems/Spikenaut-SNN](https://github.com/rmems/Spikenaut-SNN) `dataset/merged_v2/`.
+
+The sidecar has its own environment (`scripts/Project.toml`) because JSON3 is
+not a dependency of the package itself — run it with `--project=scripts`, not
+`--project=.`:
+
+```bash
+julia --project=scripts -e 'using Pkg; Pkg.instantiate()'   # once
+
+julia --project=scripts scripts/spikenaut_train.jl \
+  /path/to/qubic_ticks_snn.jsonl \
+  20 /tmp/spikenaut-out
+```
+
+Train on `qubic_ticks_snn.jsonl` (~27k rows). The 8-record `fresh_sync` sample produces the monotonic all-positive hidden-weight artifact. Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Hugging Face `rmems/Spikenaut-SNN` is a weight mirror only — commit artifacts on GitHub first.
+
 ## Integration
 
 `SynapticDistill.jl` is intentionally framework-agnostic. Application-specific IPC, teacher-model execution, hardware interfaces, and domain-specific model architectures should live in caller code and connect through injected model-step and loss callbacks.
