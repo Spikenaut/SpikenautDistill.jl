@@ -241,6 +241,8 @@ end
         model1 = MockSNN(reshape(Float32[0.5], 1, 1))
         grads1, _ = update_eprop!(model1, one, 1.0f0, (logits = zeros(Float32, 1),))
         @test size(grads1) == (1, 1)
+    end
+
     @testset "spikenaut_train sidecar (signed E/I + K-WTA + Q8.8)" begin
         script_src = read(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"), String)
         @test !occursin(r"(?m)^using SynapticDistill\b", script_src)
