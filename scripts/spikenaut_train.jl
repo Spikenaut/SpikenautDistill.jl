@@ -36,7 +36,9 @@
 # that already carry the five live fields + episode_id.
 #
 # Do not export weights to Hugging Face. Do not write rmems/Spikenaut-SNN
-# `dataset/merged_v2/`. K-WTA stays on in training; health eval is k=none.
+# `dataset/merged_v2/`. K-WTA stays on in training. Health eval is k=none
+# on test gpu-000170..198 (mean pairwise cofire + all-16 + I spikes).
+# Errors if the JSONL has no test episodes — will not silently eval train.
 
 using JSON3, LinearAlgebra, Printf, Random, Statistics
 
@@ -359,6 +361,27 @@ function filter_split(samples, split::Symbol)
         episode_split(episode_index_of(sample)) === split && push!(out, sample)
     end
     return out
+end
+
+"""
+    require_test_split(samples) -> Vector
+
+Health acceptance is k=none on test `gpu-000170..198` (exp-009 / exp-013).
+Returns those rows in file order. Errors if `episode_id` is missing or if
+no test episodes exist — never falls back to the train split.
+"""
+function require_test_split(samples)
+    any(s -> episode_index_of(s) !== nothing, samples) || error(
+        "No episode_id on records; cannot select test gpu-000170..198. " *
+        "Refusing to evaluate health on the train split."
+    )
+    test_samples = filter_split(samples, :test)
+    isempty(test_samples) && error(
+        "No test episodes (gpu-000170..198) in this JSONL. " *
+        "Health eval is k=none on the test split (exp-009/013); " *
+        "refusing to evaluate the train split."
+    )
+    return test_samples
 end
 
 function reset_temporal!(bank::LIFBank)
@@ -686,10 +709,39 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
 end
 
 """
+    mean_pairwise_cofire(spike_counts, both) -> Float64
+
+Mean pairwise cosine of spike trains: for each pair of neurons that
+fired at least once, `both_ij / sqrt(n_i * n_j)`. Silent neurons are
+excluded so 11 lockstep + 5 silent → ~1 (not 55/120). Matches Scientist
+"mean pairwise cofire" (exp-009: k=4 from 16 → 0.20; all-16 → 1.0).
+"""
+function mean_pairwise_cofire(spike_counts, both)
+    acc = 0.0
+    np = 0
+    n = length(spike_counts)
+    @inbounds for i in 1:(n - 1)
+        ni = spike_counts[i]
+        ni == 0 && continue
+        for j in (i + 1):n
+            nj = spike_counts[j]
+            nj == 0 && continue
+            acc += both[i, j] / sqrt(Float64(ni) * Float64(nj))
+            np += 1
+        end
+    end
+    return np == 0 ? 0.0 : acc / np
+end
+
+"""
     health_eval(bank, samples) -> NamedTuple
 
 Forward pass with k=none (no K-WTA). Training may use k=4; health does not.
 Resets membrane at each `episode_id` boundary. Does not update weights.
+
+Call with the **test** split (`gpu-000170..198`). The CLI default train
+filter must not be passed here — train health leaks and cannot close the
+exp-009 bar (cofire 0.891 / all-16 0.311).
 """
 function health_eval(bank::LIFBank, samples)
     reset_temporal!(bank)
@@ -697,6 +749,8 @@ function health_eval(bank::LIFBank, samples)
     all16 = 0
     inhib_spikes = 0
     n_pat = Set{UInt32}()
+    spike_counts = zeros(Int, N_NEURONS)
+    both = zeros(Int, N_NEURONS, N_NEURONS)
     prev_ep = nothing
     for sample in samples
         ep = episode_index_of(sample)
@@ -709,8 +763,19 @@ function health_eval(bank::LIFBank, samples)
         nspk == N_NEURONS && (all16 += 1)
         inhib_spikes += count(bank.spikes[INHIB_ROWS])
         bits = UInt32(0)
+        fired = Int[]
         @inbounds for i in 1:N_NEURONS
-            bank.spikes[i] && (bits |= UInt32(1) << (i - 1))
+            if bank.spikes[i]
+                bits |= UInt32(1) << (i - 1)
+                spike_counts[i] += 1
+                push!(fired, i)
+            end
+        end
+        @inbounds for a in 1:(length(fired) - 1)
+            i = fired[a]
+            for b in (a + 1):length(fired)
+                both[i, fired[b]] += 1
+            end
         end
         push!(n_pat, bits)
     end
@@ -719,6 +784,7 @@ function health_eval(bank::LIFBank, samples)
         n = length(samples),
         spk_per_tick = total_spikes / n,
         all16_frac = all16 / n,
+        cofire = mean_pairwise_cofire(spike_counts, both),
         patterns = length(n_pat),
         inhib_spikes = inhib_spikes,
         k = "none",
@@ -736,6 +802,8 @@ function main(args=ARGS)
         "  holdout:   train gpu-000000..138; val 140..168; test 170..198;\n" *
         "             embargo 139 and 169. Never shuffle across episodes.\n" *
         "  unused:    axons 5..15 held at 0 (width, not fake channels).\n" *
+        "  health:    k=none on test gpu-000170..198 (cofire, all-16, I spikes).\n" *
+        "             Errors if the JSONL has no test episodes.\n" *
         "  example:   julia scripts/spikenaut_train.jl $DEFAULT_V3_JSONL 20 /tmp/spikenaut-out train"
     )
     data_path = args[1]
@@ -754,7 +822,7 @@ function main(args=ARGS)
     println("Live   : mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz")
     println("Scale  : frozen train minmax lineage=$FROZEN_LINEAGE; axons 5..15 unused=0")
     println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory (outgoing readout); incoming W unsigned")
-    println("K-WTA  : train k=$K_WTA; health eval k=none")
+    println("K-WTA  : train k=$K_WTA; health eval k=none on test gpu-000170..198")
     println("Decay  : keep=$DECAY  (Rust leak = $(1 - DECAY))")
 
     print("Loading samples... ")
@@ -778,6 +846,14 @@ function main(args=ARGS)
     end
     if length(samples) < MIN_TRAIN_N
         @warn "Only $(length(samples)) records — monotonic / collapsed weights are likely."
+    end
+
+    # Health is always the held-out test split. Resolve it before training so a
+    # train-only JSONL errors instead of silently printing train health.
+    test_samples = nothing
+    if any(is_state_telemetry, loaded)
+        test_samples = require_test_split(loaded)
+        println("Health  : k=none on test gpu-000170..198 ($(length(test_samples)) rows); not the $split split")
     end
 
     bank = LIFBank()
@@ -825,10 +901,10 @@ function main(args=ARGS)
                 epoch, epochs, avg_r, s_rate, max_spikes, w_mean, w_std, w_min, w_max, n_inh, ms_tick)
     end
 
-    if any(is_state_telemetry, samples)
-        h = health_eval(bank, samples)
-        @printf("Health k=none | n=%d | spk/tick=%.3f | all-16=%.3f | patterns=%d | I_spikes=%d\n",
-                h.n, h.spk_per_tick, h.all16_frac, h.patterns, h.inhib_spikes)
+    if test_samples !== nothing
+        h = health_eval(bank, test_samples)
+        @printf("Health k=none | split=test gpu-000170..198 | n=%d | spk/tick=%.3f | all-16=%.3f | cofire=%.3f | patterns=%d | I_spikes=%d\n",
+                h.n, h.spk_per_tick, h.all16_frac, h.cofire, h.patterns, h.inhib_spikes)
     end
 
     paths = export_artifacts(bank, out_dir)

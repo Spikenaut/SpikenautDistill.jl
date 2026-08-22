@@ -382,6 +382,16 @@ end
             @test [episode_index_of(r) for r in tr] == [0, 0]
             # Missing episode_id is dropped, not invented.
             @test filter_split([Dict(:mem_util_pct => 1)], :train) == []
+
+            # Health must use test, never the already-filtered train split.
+            health_rows = require_test_split(rows)
+            @test length(health_rows) == 2
+            @test all(r -> episode_split(episode_index_of(r)) === :test, health_rows)
+            @test episode_index_of(health_rows[1]) == 180
+            @test episode_index_of(health_rows[2]) == 196
+            @test health_rows != tr
+            @test_throws ErrorException require_test_split(tr)
+            @test_throws ErrorException require_test_split([Dict(:mem_util_pct => 1)])
         end
 
         @testset "legacy spikes still work" begin
@@ -471,12 +481,41 @@ end
             n_none = tick!(eval_bank, fill(1f0, N_CHANNELS), 0f0, nothing; k=nothing, learn=false)
             @test n_none >= 0
             h = health_eval(eval_bank, [Dict(
-                :episode_id => "gpu-000000",
+                :episode_id => "gpu-000170",
                 :mem_util_pct => 75, :power_w => 302.8450012207031,
                 :gpu_temp_c => 69, :sm_clock_mhz => 2910, :mem_clock_mhz => 14801,
             )])
             @test h.k == "none"
             @test h.n == 1
+            @test haskey(h, :cofire)
+            @test h.cofire >= 0
+
+            # Mean pairwise cofire (cosine, silent neurons excluded).
+            # All-16 every tick → 1.0. Four disjoint k=4 groups → 0.20.
+            n = N_NEURONS
+            counts16 = fill(4, n)
+            both16 = zeros(Int, n, n)
+            for i in 1:(n - 1), j in (i + 1):n
+                both16[i, j] = 4
+            end
+            @test mean_pairwise_cofire(counts16, both16) ≈ 1.0
+            counts_k4 = ones(Int, n)
+            both_k4 = zeros(Int, n, n)
+            for g in 0:3
+                members = (4g + 1):(4g + 4)
+                for i in members, j in members
+                    i < j && (both_k4[i, j] = 1)
+                end
+            end
+            @test mean_pairwise_cofire(counts_k4, both_k4) ≈ 0.2
+            # 11 lockstep + 5 silent → 1.0, not C(11,2)/C(16,2).
+            counts11 = [fill(3, 11); zeros(Int, 5)]
+            both11 = zeros(Int, n, n)
+            for i in 1:10, j in (i + 1):11
+                both11[i, j] = 3
+            end
+            @test mean_pairwise_cofire(counts11, both11) ≈ 1.0
+            @test mean_pairwise_cofire(zeros(Int, n), zeros(Int, n, n)) == 0.0
         end
 
         @testset "parquet ingest is refused (no silent converter)" begin
@@ -485,6 +524,28 @@ end
                 write(pq, "not a real parquet")
                 @test_throws ErrorException load_data(pq)
                 @test_throws ErrorException load_data(dir)
+            end
+        end
+
+        @testset "health_eval is test split, not train (exp-013)" begin
+            fixture = joinpath(@__DIR__, "fixtures", "state_telemetry_head.jsonl")
+            rows = load_jsonl(fixture)
+            mktempdir() do dir
+                # Train-only JSONL must error — not silently print train health.
+                only_train = joinpath(dir, "train_only.jsonl")
+                write(only_train, join(readlines(fixture)[1:2], "\n") * "\n")
+                @test_throws ErrorException main([only_train, "1", joinpath(dir, "out-train")])
+
+                # Full fixture has test episodes: train on train, eval n == test n.
+                out = joinpath(dir, "out-full")
+                bank = main([fixture, "1", out, "train"])
+                @test bank isa LIFBank
+                te = require_test_split(rows)
+                h = health_eval(bank, te)
+                @test h.n == length(te) == 2
+                @test h.n != 7
+                @test h.k == "none"
+                @test haskey(h, :cofire)
             end
         end
     end
