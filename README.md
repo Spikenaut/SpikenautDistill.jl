@@ -117,7 +117,35 @@ Any function that takes that output and returns a scalar loss is a valid loss fu
 
 ## Spikenaut sidecar (`scripts/spikenaut_train.jl`)
 
-Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files consumed by [rmems/Spikenaut-SNN](https://github.com/rmems/Spikenaut-SNN) `dataset/merged_v2/`.
+Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` has no E/I sign. Health evaluation is `k=none`.
+
+It trains on the **legal v3 `state_telemetry` encoder**, not `qubic_ticks_snn` `*_derived` columns (those are a closed form of `tick_rate`; Spikenaut Scientist exp-008, 0 mismatches / 27430). Pointing the sidecar at derived-only JSONL errors instead of silently training on forbidden sensors.
+
+**Live columns** (axons 0..4; survive train AND val AND test; exp-008):
+
+`mem_util_pct`, `power_w`, `gpu_temp_c`, `sm_clock_mhz`, `mem_clock_mhz`
+
+Axons 5..15 are unused width, held at 0 — not fake channels and not first-differences. Do not use `fan_speed_pct` or `vddcr_gfx_v` (constant on val), `vram_temp_c` (`gpu_temp+8` except idle 0), or `step_idx`. Reward and readout targets use live `power_w` and `gpu_temp_c`.
+
+**Frozen minmax** (v3 `state_telemetry` train split, sha lineage `74acdd0f`). Clamp to `[0, 1]` after scale. Do not refit on val/test:
+
+| column | min | max |
+| --- | --- | --- |
+| `mem_util_pct` | 0 | 75 |
+| `power_w` | 8.527000427246094 | 302.8450012207031 |
+| `gpu_temp_c` | 0 | 69 |
+| `sm_clock_mhz` | 180 | 2910 |
+| `mem_clock_mhz` | 405 | 14801 |
+
+**Episode holdout** (`episode_id`; never shuffle rows across episodes; `ts_utc` is not invented):
+
+- train `gpu-000000..138`
+- embargo 139
+- val `gpu-000140..168`
+- embargo 169
+- test `gpu-000170..198`
+
+Ingest is JSONL. Published v3 shards are parquet; this sidecar does not convert them or fabricate timestamps. Pass JSONL records that already carry the five live fields plus `episode_id`.
 
 The sidecar has its own environment (`scripts/Project.toml`) because JSON3 is
 not a dependency of the package itself — run it with `--project=scripts`, not
@@ -127,11 +155,13 @@ not a dependency of the package itself — run it with `--project=scripts`, not
 julia --project=scripts -e 'using Pkg; Pkg.instantiate()'   # once
 
 julia --project=scripts scripts/spikenaut_train.jl \
-  /path/to/qubic_ticks_snn.jsonl \
-  20 /tmp/spikenaut-out
+  /path/to/state_telemetry.jsonl \
+  20 /tmp/spikenaut-out train
 ```
 
-Train on `qubic_ticks_snn.jsonl` (~27k rows). The 8-record `fresh_sync` sample produces the monotonic all-positive hidden-weight artifact. Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Hugging Face `rmems/Spikenaut-SNN` is a weight mirror only — commit artifacts on GitHub first.
+Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Do not export weights to Hugging Face and do not write `rmems/Spikenaut-SNN` `dataset/merged_v2/` from this path.
+
+Cite: **Spikenaut Scientist** · exp-008..011.
 
 ## Integration
 

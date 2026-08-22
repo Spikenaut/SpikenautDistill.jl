@@ -243,11 +243,18 @@ end
         @test size(grads1) == (1, 1)
     end
 
-    @testset "spikenaut_train sidecar (signed E/I + K-WTA + Q8.8)" begin
+    @testset "spikenaut_train sidecar (v3 live encoder + Dale + K-WTA)" begin
         script_src = read(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"), String)
         @test !occursin(r"(?m)^using SynapticDistill\b", script_src)
-        @test occursin("reward_hint_derived", script_src)
+        @test occursin("mem_util_pct", script_src)
+        @test occursin("sm_clock_mhz", script_src)
+        @test occursin("74acdd0f", script_src)
+        @test occursin("gpu-000000..138", script_src)
         @test occursin("parameters_output_weights.mem", script_src)
+        # Encoder path must not *read* *_derived. The names may appear only
+        # as forbidden-sensor refusals (exp-008).
+        @test occursin("FORBIDDEN_SENSORS", script_src)
+        @test occursin("Refusing *_derived", script_src)
 
         # Include the standalone sidecar without running main().
         include(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"))
@@ -261,51 +268,120 @@ end
             @test q88_signed(DECAY) == q88_signed(0.85f0)
         end
 
-        @testset "27k telemetry encoder" begin
-            rec = Dict(
-                :timestamp => "2026-03-20T08:55:24+00:00",
-                :tick => 46538099,
+        @testset "v3 state_telemetry encoder (exp-008..011)" begin
+            # Fixture row 1: live fields + contradictory *_derived / forbidden
+            # extras. Scaling must match frozen train constants, not derived.
+            fixture = joinpath(@__DIR__, "fixtures", "state_telemetry_head.jsonl")
+            rows = load_jsonl(fixture)
+            @test length(rows) == 7
+            rec = rows[1]
+            @test is_state_telemetry(rec)
+            @test is_forbidden_derived(rec)  # derived keys are present but unread
+
+            stim = to_stimuli(rec)
+            @test length(stim) == N_CHANNELS
+            @test all(0 .<= stim .<= 1)
+            # Frozen scales, sha lineage 74acdd0f:
+            # mem_util 37.5 / 75 = 0.5
+            # power at train min → 0
+            # gpu_temp 34.5 / 69 = 0.5
+            # sm (1545-180)/(2910-180) = 0.5
+            # memclk at train min → 0
+            @test stim[1] ≈ 0.5f0
+            @test stim[2] ≈ 0f0
+            @test stim[3] ≈ 0.5f0
+            @test stim[4] ≈ 0.5f0
+            @test stim[5] ≈ 0f0
+            # Unused axons 5..15 (Julia 6:16) are unused width, not data.
+            @test all(==(0f0), stim[6:16])
+
+            # Changing only *_derived must not move any axon.
+            poisoned = Dict(
+                :mem_util_pct => 37.5,
+                :power_w => 8.527000427246094,
+                :gpu_temp_c => 34.5,
+                :sm_clock_mhz => 1545,
+                :mem_clock_mhz => 405,
+                :hashrate_mh_derived => 0.0,
+                :power_w_derived => 10.0,
+                :gpu_temp_c_derived => 0.0,
+                :reward_hint_derived => 0.0,
+                :tick_rate => 0.0,
+            )
+            @test to_stimuli(poisoned) == stim
+
+            # T=0 stays 0 — no impute from vram or a neighbour.
+            idle = to_stimuli(rows[2])
+            @test idle[3] == 0f0
+            @test all(==(0f0), idle[6:16])
+
+            # *_derived-only records (qubic_ticks_snn) are refused.
+            derived_only = Dict(
                 :tick_rate => 0.4333,
-                :qubic_tick_trace => 0.0,
                 :hashrate_mh_derived => 1.812488,
                 :power_w_derived => 381.248828,
                 :gpu_temp_c_derived => 72.187324,
                 :reward_hint_derived => 0.812488,
             )
-            stim = to_stimuli(rec)
-            @test length(stim) == N_CHANNELS
-            @test all(0 .<= stim .<= 1)
-            @test is_telemetry(rec)
+            @test !is_state_telemetry(derived_only)
+            @test is_forbidden_derived(derived_only)
+            @test_throws ErrorException to_stimuli(derived_only)
+            @test_throws ErrorException assert_legal_sensors!([derived_only])
 
-            r = sample_reward(rec)
-            @test -1 ≤ r ≤ 1
-            # High hint (0.81) minus mild thermal/power pain — not clamped to [0, 1] only.
-            pain = sample_reward(Dict(
-                :reward_hint_derived => 0.0,
-                :gpu_temp_c_derived => 75.0,
-                :power_w_derived => 400.0,
-            ))
-            @test pain < 0
+            qubic = load_jsonl(joinpath(@__DIR__, "fixtures", "qubic_ticks_snn_head.jsonl"))
+            @test_throws ErrorException to_stimuli(qubic[1])
+            @test_throws ErrorException assert_legal_sensors!(qubic)
 
-            enc = StimEncoder()
-            s1 = to_stimuli(rec, enc)
-            rec2 = merge(rec, Dict(:hashrate_mh_derived => 1.0, :reward_hint_derived => 0.0))
-            s2 = to_stimuli(rec2, enc)
-            @test s1 != s2
+            # Reward / readout use live power_w and gpu_temp_c, not *_derived.
+            # Row 1: temp_u=0.5, power_u=0 → reward = 1 - 0.5 - 0 = 0.5
+            @test sample_reward(rec) ≈ 0.5f0
+            tgt = sample_readout_target(rec)
+            @test tgt[2] ≈ 0.5f0          # live temp
+            @test tgt[3] ≈ 0f0            # live power at train min
+            # Derived would have been temp 75 / power 400 if those were read.
+            hot = Dict(:gpu_temp_c => 69.0, :power_w => 302.8450012207031,
+                       :mem_util_pct => 0, :sm_clock_mhz => 180, :mem_clock_mhz => 405,
+                       :gpu_temp_c_derived => 0.0, :power_w_derived => 8.5)
+            @test sample_reward(hot) < 0
+            @test sample_readout_target(hot)[2] ≈ 1f0
+            @test sample_readout_target(hot)[3] ≈ 1f0
 
-            # Delta channels must actually track history. `s1 != s2` alone
-            # passes on the level channels even when `prev` aliases `enc.prev`
-            # and every delta reads `cur - cur`.
-            @test all(≈(0.5f0), s1[7:11])   # first tick: no history, neutral
-            @test s1[14] == 0f0
-            @test s2[9] < 0.5f0             # hashrate 1.812 -> 1.0, so down
-            @test s2[14] > 0f0              # hash_drop registers the fall
+            # Clamp after scale: values outside the train box stay in [0, 1].
+            ood = Dict(:mem_util_pct => 90, :power_w => 0, :gpu_temp_c => 80,
+                       :sm_clock_mhz => 100, :mem_clock_mhz => 20000)
+            ood_stim = to_stimuli(ood)
+            @test all(0 .<= ood_stim .<= 1)
+            @test ood_stim[1] == 1f0
+            @test ood_stim[3] == 1f0
+            @test ood_stim[5] == 1f0
+        end
 
-            fixture = joinpath(@__DIR__, "fixtures", "qubic_ticks_snn_head.jsonl")
-            rows = load_jsonl(fixture)
-            @test length(rows) == 4
-            @test length(to_stimuli(rows[1])) == 16
-            @test sample_reward(rows[4]) < 0
+        @testset "episode holdout (no row shuffle)" begin
+            rows = load_jsonl(joinpath(@__DIR__, "fixtures", "state_telemetry_head.jsonl"))
+            @test episode_index("gpu-000138") == 138
+            @test episode_split("gpu-000000") === :train
+            @test episode_split("gpu-000138") === :train
+            @test episode_split("gpu-000139") === nothing
+            @test episode_split("gpu-000150") === :val
+            @test episode_split("gpu-000168") === :val
+            @test episode_split("gpu-000169") === nothing
+            @test episode_split("gpu-000170") === :test
+            @test episode_split("gpu-000198") === :test
+
+            tr = filter_split(rows, :train)
+            va = filter_split(rows, :val)
+            te = filter_split(rows, :test)
+            @test length(tr) == 2 && all(r -> episode_index_of(r) == 0, tr)
+            @test length(va) == 1 && episode_index_of(va[1]) == 150
+            @test length(te) == 2
+            @test episode_index_of(te[1]) == 180
+            @test episode_index_of(te[2]) == 196
+            # File order preserved; embargo 139 and 169 never appear.
+            embargoed = [episode_index_of(r) for r in rows if episode_split(episode_index_of(r)) === nothing]
+            @test embargoed == [139, 169]
+            @test [episode_index_of(r) for r in tr] == [0, 0]
+            # Missing episode_id is dropped, not invented.
+            @test filter_split([Dict(:mem_util_pct => 1)], :train) == []
         end
 
         @testset "legacy spikes still work" begin
@@ -380,7 +456,35 @@ end
                 model = read(joinpath(dir, "snn_model.json"), String)
                 @test occursin("keep", model)
                 @test occursin("80:20", model)
+                @test occursin("outgoing", model)
+                @test occursin("v3_state_telemetry", model)
+                @test occursin("mem_util_pct", model)
+                @test occursin("74acdd0f", model)
+                @test occursin("5:15", model)
                 @test length(paths) == 5
+            end
+
+            # Health eval is k=none: a strong drive can fire more than K_WTA.
+            Random.seed!(11)
+            eval_bank = LIFBank()
+            eval_bank.weights .= 0.4f0
+            n_none = tick!(eval_bank, fill(1f0, N_CHANNELS), 0f0, nothing; k=nothing, learn=false)
+            @test n_none >= 0
+            h = health_eval(eval_bank, [Dict(
+                :episode_id => "gpu-000000",
+                :mem_util_pct => 75, :power_w => 302.8450012207031,
+                :gpu_temp_c => 69, :sm_clock_mhz => 2910, :mem_clock_mhz => 14801,
+            )])
+            @test h.k == "none"
+            @test h.n == 1
+        end
+
+        @testset "parquet ingest is refused (no silent converter)" begin
+            mktempdir() do dir
+                pq = joinpath(dir, "train-00000.parquet")
+                write(pq, "not a real parquet")
+                @test_throws ErrorException load_data(pq)
+                @test_throws ErrorException load_data(dir)
             end
         end
     end

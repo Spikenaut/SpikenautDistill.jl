@@ -2,22 +2,41 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # spikenaut_train.jl — Spikenaut LIF Trainer (standalone sidecar)
 #
-# Loads temporal event-stream JSONL *or* qubic_ticks_snn telemetry JSONL,
-# runs LIF + Dale 80:20 + K-WTA + reward-modulated STDP / e-prop,
-# then writes snn_model.json + signed Q8.8 .mem files for
-# rmems/Spikenaut-SNN `dataset/merged_v2/`.
+# Loads temporal event-stream JSONL *or* v3 `state_telemetry` JSONL
+# (five live sensors). Runs LIF + outgoing Dale 80:20 + K-WTA +
+# reward-modulated STDP / e-prop, then writes snn_model.json + signed
+# Q8.8 .mem files.
 #
 # Standalone: JSON3 + stdlib only. Does **not** `using SynapticDistill`
 # (library `update_eprop!` / `update_ottt!` are still stubs).
 #
-# Usage:
-#   julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir]
-#   julia scripts/spikenaut_train.jl \
-#     /home/raulmc/Spikenaut-Vault/Spikenaut-SNN-Telemetry/full_data/qubic_ticks_snn.jsonl \
-#     20 /tmp/spikenaut-out
+# Legal live columns (Spikenaut Scientist exp-008; survive train/val/test,
+# not constant, not all-null, not identity). Axons 0..4 (Julia 1..5):
+#   mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz
+# Axons 5..15 (Julia 6..16) are unused width, held at 0 — not fake channels.
 #
-# Prefer the ~27k `qubic_ticks_snn.jsonl`. The 8-record `fresh_sync` sample
-# produces degenerate / monotonic hidden weights.
+# Forbidden: *_derived (closed form of tick_rate; 0 mismatches / 27430),
+# fan_speed_pct, vddcr_gfx_v (constant on val), vram_temp_c (gpu_temp+8
+# except idle 0), step_idx, first-difference inventions, fabricated ts_utc.
+#
+# Frozen minmax (v3 state_telemetry train, sha lineage 74acdd0f).
+# Clamp to [0, 1] after scale. Do not refit on val/test.
+#
+# Episode holdout (never shuffle rows across episodes; embargo 139, 169):
+#   train gpu-000000..138   val gpu-000140..168   test gpu-000170..198
+#
+# Usage:
+#   julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir] [split]
+#   julia scripts/spikenaut_train.jl \
+#     /path/to/state_telemetry.jsonl \
+#     20 /tmp/spikenaut-out train
+#
+# Ingest is JSONL (JSON3 + stdlib). Published v3 shards are parquet; this
+# sidecar does not convert or invent timestamps. Point it at JSONL records
+# that already carry the five live fields + episode_id.
+#
+# Do not export weights to Hugging Face. Do not write rmems/Spikenaut-SNN
+# `dataset/merged_v2/`. K-WTA stays on in training; health eval is k=none.
 
 using JSON3, LinearAlgebra, Printf, Random, Statistics
 
@@ -40,18 +59,41 @@ const ROW_L2_CAP   = 2.0f0
 const THRESH_INIT  = 1.0f0
 const TRACE_LAMBDA = 0.85f0
 const MIN_TRAIN_N  = 100
-const DEFAULT_27K  = "/home/raulmc/Spikenaut-Vault/Spikenaut-SNN-Telemetry/full_data/qubic_ticks_snn.jsonl"
+const DEFAULT_V3_JSONL = "/home/raulmc/Spikenaut-Vault/Spikenaut-SNN-Telemetry/v3/state_telemetry.jsonl"
 
-# Physical scales observed on qubic_ticks_snn (27,430 rows).
-# Stimuli are Poisson rates in [0, 1]; deltas are folded through 0.5 + 0.5 tanh.
-const TICK_RATE_SCALE   = 0.5333f0
-const HASHRATE_SCALE    = 2.0f0
-const POWER_MIN         = 300.0f0
-const POWER_SPAN        = 100.0f0
-const TEMP_MIN          = 60.0f0
-const TEMP_SPAN         = 15.0f0
-const THERMAL_COMFORT_C = 70.0f0
-const POWER_BUDGET_W    = 380.0f0
+# Legal v3 live columns → axons 0..4. Order is the encoder contract.
+const LIVE_COLUMNS = (
+    :mem_util_pct,
+    :power_w,
+    :gpu_temp_c,
+    :sm_clock_mhz,
+    :mem_clock_mhz,
+)
+const N_LIVE_AXONS = length(LIVE_COLUMNS)   # 5; axons 5..15 unused
+
+# Frozen minmax from v3 state_telemetry train split (sha lineage 74acdd0f).
+# Do not recompute on val/test. Scale then clamp to [0, 1].
+const FROZEN_MINMAX = (
+    mem_util_pct  = (0.0,                    75.0),
+    power_w       = (8.527000427246094,      302.8450012207031),
+    gpu_temp_c    = (0.0,                    69.0),
+    sm_clock_mhz  = (180.0,                  2910.0),
+    mem_clock_mhz = (405.0,                  14801.0),
+)
+const FROZEN_LINEAGE = "74acdd0f"
+
+# Episode holdout. Session key is episode_id (ts_utc is 100% null on v3).
+const TRAIN_EP_LO, TRAIN_EP_HI = 0, 138
+const VAL_EP_LO,   VAL_EP_HI   = 140, 168
+const TEST_EP_LO,  TEST_EP_HI  = 170, 198
+const EMBARGO_EPS = (139, 169)
+
+# Sensors that must never become axons. Named so tests can grep the refusal.
+const FORBIDDEN_SENSORS = (
+    :hashrate_mh_derived, :power_w_derived, :gpu_temp_c_derived,
+    :reward_hint_derived, :tick_rate, :fan_speed_pct, :vddcr_gfx_v,
+    :vram_temp_c, :step_idx,
+)
 
 # ── LIF State ─────────────────────────────────────────────────────────
 mutable struct LIFBank
@@ -130,41 +172,56 @@ function rec_f32(sample, default::Float32, names::Symbol...)
     return Float32(v)
 end
 
-# ── Stimulus / reward from 27k telemetry or legacy spike rows ─────────
-mutable struct StimEncoder
-    prev::Vector{Float32}   # [tick_rate, trace, hashrate, power, temp, hint]
-    initialized::Bool
-end
-StimEncoder() = StimEncoder(zeros(Float32, 6), false)
+# ── Stimulus / reward from v3 state_telemetry or legacy spike rows ────
+"""
+    frozen_unit01(x, lo, hi) -> Float32
 
-function _unit01(x::Float32)
-    return clamp(x, 0f0, 1f0)
+`(x - lo) / (hi - lo)` then clamp to `[0, 1]`. `nothing` / missing is **0**,
+not an imputed neighbour or a refit minmax. T=0 stays 0.
+"""
+function frozen_unit01(x, lo::Real, hi::Real)
+    x === nothing && return 0f0
+    span = Float32(hi) - Float32(lo)
+    span == 0f0 && return 0f0
+    return clamp((Float32(x) - Float32(lo)) / span, 0f0, 1f0)
 end
 
-function _delta01(cur::Float32, prev::Float32, scale::Float32)
-    # Map signed delta → Poisson rate in (0, 1).
-    return Float32(0.5 + 0.5 * tanh((cur - prev) / max(scale, 1f-6)))
+function frozen_unit01(col::Symbol, x)
+    lo, hi = getfield(FROZEN_MINMAX, col)
+    return frozen_unit01(x, lo, hi)
 end
 
 """
-    is_telemetry(sample) -> Bool
+    live_f32(sample, col) -> Union{Float32, Nothing}
 
-True for `qubic_ticks_snn` rows (`reward_hint_derived`, `hashrate_mh_derived`,
-`gpu_temp_c_derived`, `tick_rate`, …). Those rows have **no** `spikes`/`inputs`.
+Read one legal live column. Does **not** fall back to `*_derived`.
+JSON `null` and a missing key are both `nothing` (encode as 0).
 """
-function is_telemetry(sample)
+function live_f32(sample, col::Symbol)
+    v = rec_get(sample, col)
+    v === nothing && return nothing
+    return Float32(v)
+end
+
+"""
+    is_state_telemetry(sample) -> Bool
+
+True when the record carries any of the five legal live columns.
+`*_derived` / `tick_rate` do **not** count — those are forbidden sensors.
+"""
+function is_state_telemetry(sample)
+    rec_get(sample, LIVE_COLUMNS...) !== nothing
+end
+
+"""
+    is_forbidden_derived(sample) -> Bool
+
+True for `qubic_ticks_snn` rows that only have `tick_rate` + `*_derived`.
+v3 `state_telemetry` does not contain those field names.
+"""
+function is_forbidden_derived(sample)
     rec_get(sample, :reward_hint_derived, :hashrate_mh_derived,
             :gpu_temp_c_derived, :power_w_derived, :tick_rate) !== nothing
-end
-
-function raw_telemetry(sample)
-    tick_rate = rec_f32(sample, 0f0, :tick_rate)
-    trace     = rec_f32(sample, 0f0, :qubic_tick_trace)
-    hashrate  = rec_f32(sample, 0f0, :hashrate_mh_derived)
-    power     = rec_f32(sample, POWER_MIN, :power_w_derived)
-    temp      = rec_f32(sample, TEMP_MIN, :gpu_temp_c_derived)
-    hint      = rec_f32(sample, 0.5f0, :reward_hint_derived, :reward_hint, :reward)
-    return Float32[tick_rate, trace, hashrate, power, temp, hint]
 end
 
 """
@@ -173,12 +230,15 @@ end
 16-channel Poisson rates.
 
 - Legacy: `spikes` / `inputs` (clamped to [0, 1], padded/truncated to 16).
-- Telemetry (`qubic_ticks_snn`): 6 rate-coded physical channels, 5 first
-  differences, 5 pain / efficiency / composite channels.
+- v3 `state_telemetry`: axons 0..4 are the five live columns after frozen
+  minmax; axons 5..15 stay 0 as unused width (not fake channels, not
+  first-differences, not composites).
 
-Does **not** require `spikes`/`inputs` — that path crashed on the 27k file.
+`enc` is accepted for call-site compatibility and ignored — there is no
+history channel. Pointing this at `qubic_ticks_snn` (`*_derived`) errors
+instead of silently training on a closed form of `tick_rate`.
 """
-function to_stimuli(sample, enc::Union{StimEncoder,Nothing}=nothing)
+function to_stimuli(sample, enc=nothing)
     raw = rec_get(sample, :spikes, :inputs)
     if raw !== nothing
         stim = zeros(Float32, N_CHANNELS)
@@ -189,92 +249,124 @@ function to_stimuli(sample, enc::Union{StimEncoder,Nothing}=nothing)
         return stim
     end
 
-    is_telemetry(sample) || error(
-        "Sample is missing `spikes`/`inputs` and is not qubic_ticks_snn telemetry " *
-        "(expected reward_hint_derived / hashrate_mh_derived / gpu_temp_c_derived / tick_rate)"
+    if is_state_telemetry(sample)
+        stim = zeros(Float32, N_CHANNELS)
+        @inbounds for (i, col) in enumerate(LIVE_COLUMNS)
+            stim[i] = frozen_unit01(col, live_f32(sample, col))
+        end
+        # axons 5..15 (Julia 6:16) remain 0 — unused width.
+        return stim
+    end
+
+    is_forbidden_derived(sample) && error(
+        "Refusing *_derived / tick_rate sensors (closed form of tick_rate; " *
+        "Spikenaut Scientist exp-008, 0 mismatches / 27430). " *
+        "Legal v3 live columns: mem_util_pct, power_w, gpu_temp_c, " *
+        "sm_clock_mhz, mem_clock_mhz. Unused axons 5..15 stay 0."
     )
 
-    cur = raw_telemetry(sample)
-    # `copy` is load-bearing: `enc.prev .= cur` below mutates in place, so
-    # binding `prev` to `enc.prev` would alias it and every delta channel
-    # would read `cur - cur`. On the first tick `prev === cur` is intended —
-    # no history yet, so deltas start neutral.
-    prev = if enc !== nothing && enc.initialized
-        copy(enc.prev)
-    else
-        cur
-    end
-    if enc !== nothing
-        enc.prev .= cur
-        enc.initialized = true
-    end
-
-    tick_rate, trace, hashrate, power, temp, hint = cur
-    p_tick, p_trace, p_hash, p_power, p_temp, p_hint = prev
-
-    thermal_pain = _unit01((temp - THERMAL_COMFORT_C) / 10f0)
-    power_pain   = _unit01((power - POWER_BUDGET_W) / 50f0)
-    hash_drop    = _unit01((p_hash - hashrate) / HASHRATE_SCALE)
-    efficiency   = _unit01(hashrate / max(power / 200f0, 1f-3))
-    composite    = _unit01(hint * (1f0 - 0.5f0 * thermal_pain - 0.5f0 * power_pain))
-
-    return Float32[
-        _unit01(tick_rate / TICK_RATE_SCALE),          # 1
-        _unit01(trace),                                # 2
-        _unit01(hashrate / HASHRATE_SCALE),            # 3
-        _unit01((power - POWER_MIN) / POWER_SPAN),     # 4
-        _unit01((temp - TEMP_MIN) / TEMP_SPAN),        # 5
-        _unit01(hint),                                 # 6
-        _delta01(tick_rate, p_tick, 0.1f0),            # 7
-        _delta01(trace, p_trace, 0.05f0),              # 8
-        _delta01(hashrate, p_hash, 0.2f0),             # 9
-        _delta01(power, p_power, 10f0),                # 10
-        _delta01(temp, p_temp, 2f0),                   # 11
-        thermal_pain,                                  # 12
-        power_pain,                                    # 13
-        hash_drop,                                     # 14
-        efficiency,                                    # 15
-        composite,                                     # 16
-    ]
+    error(
+        "Sample is missing `spikes`/`inputs` and is not v3 state_telemetry " *
+        "(expected mem_util_pct / power_w / gpu_temp_c / sm_clock_mhz / mem_clock_mhz)"
+    )
 end
 
 """
     sample_reward(sample) -> Float32
 
-Signed learning signal in `[-1, 1]` (not `[0, 1]`).
+Signed learning signal in `[-1, 1]`.
 
-Looks up `reward_hint_derived` first (27k schema), then legacy
-`reward` / `target_reward` / `reward_hint`. Subtracts thermal and
-power pain so the trainer can depress synapses.
+v3: thermal / power pain from **live** `gpu_temp_c` and `power_w` after
+the frozen scale (hot + high-power → negative). Never reads `*_derived`.
+
+Legacy spike rows may still carry `reward` / `target_reward` / `reward_hint`.
 """
 function sample_reward(sample)::Float32
-    hint = rec_f32(sample, 0.5f0,
-                   :reward_hint_derived, :reward, :target_reward, :reward_hint)
-    temp  = rec_get(sample, :gpu_temp_c_derived)
-    power = rec_get(sample, :power_w_derived)
-    thermal_pain = temp === nothing ? 0f0 :
-        _unit01((Float32(temp) - THERMAL_COMFORT_C) / 10f0)
-    power_pain = power === nothing ? 0f0 :
-        _unit01((Float32(power) - POWER_BUDGET_W) / 50f0)
-    r = 2f0 * (hint - 0.5f0) - thermal_pain - 0.5f0 * power_pain
-    return clamp(r, -1f0, 1f0)
+    if is_state_telemetry(sample)
+        temp_u  = frozen_unit01(:gpu_temp_c, live_f32(sample, :gpu_temp_c))
+        power_u = frozen_unit01(:power_w, live_f32(sample, :power_w))
+        return clamp(1f0 - temp_u - 0.5f0 * power_u, -1f0, 1f0)
+    end
+    hint = rec_f32(sample, 0.5f0, :reward, :target_reward, :reward_hint)
+    return clamp(2f0 * (hint - 0.5f0), -1f0, 1f0)
 end
 
 function sample_readout_target(sample)::Vector{Float32}
-    # Defaults must match `raw_telemetry`, which is what fills the input
-    # channels. They used to disagree (THERMAL_COMFORT_C / POWER_BUDGET_W here
-    # vs TEMP_MIN / POWER_MIN there), so a row missing `power_w_derived` fed the
-    # net channel 4 == 0.0 while asking the readout to predict 0.8 — training it
-    # against a value its own input contradicts.
-    hint  = rec_f32(sample, 0.5f0,
-                    :reward_hint_derived, :reward, :target_reward, :reward_hint)
-    temp  = rec_f32(sample, TEMP_MIN, :gpu_temp_c_derived)
-    power = rec_f32(sample, POWER_MIN, :power_w_derived)
-    return Float32[
-        _unit01(hint),
-        _unit01((temp - TEMP_MIN) / TEMP_SPAN),
-        _unit01((power - POWER_MIN) / POWER_SPAN),
-    ]
+    if is_state_telemetry(sample)
+        temp_u  = frozen_unit01(:gpu_temp_c, live_f32(sample, :gpu_temp_c))
+        power_u = frozen_unit01(:power_w, live_f32(sample, :power_w))
+        # Three heads stay (comfort, temp, power). Comfort is 1 minus the
+        # same live pains the reward uses — not a fabricated hint, not
+        # reward_hint_derived.
+        comfort = clamp(1f0 - 0.5f0 * temp_u - 0.5f0 * power_u, 0f0, 1f0)
+        return Float32[comfort, temp_u, power_u]
+    end
+    hint = rec_f32(sample, 0.5f0, :reward, :target_reward, :reward_hint)
+    return Float32[clamp(hint, 0f0, 1f0), 0f0, 0f0]
+end
+
+# ── Episode holdout ───────────────────────────────────────────────────
+"""
+    episode_index(id) -> Union{Int, Nothing}
+
+Parse `gpu-000138` → 138. Does not invent an index from row order or time.
+"""
+function episode_index(id)
+    id === nothing && return nothing
+    s = String(id)
+    m = match(r"gpu-(\d+)$", s)
+    m === nothing && return nothing
+    return parse(Int, m.captures[1])
+end
+
+function episode_index_of(sample)
+    return episode_index(rec_get(sample, :episode_id))
+end
+
+"""
+    episode_split(id) -> Union{Symbol, Nothing}
+
+`:train` / `:val` / `:test`, or `nothing` for embargo / unparseable.
+"""
+function episode_split(id)
+    e = id isa Integer ? id : episode_index(id)
+    e === nothing && return nothing
+    e in EMBARGO_EPS && return nothing
+    TRAIN_EP_LO <= e <= TRAIN_EP_HI && return :train
+    VAL_EP_LO   <= e <= VAL_EP_HI   && return :val
+    TEST_EP_LO  <= e <= TEST_EP_HI  && return :test
+    return nothing
+end
+
+function parse_split(name::AbstractString)
+    n = lowercase(strip(name))
+    n in ("train", "tr") && return :train
+    n in ("val", "validation", "valid") && return :val
+    n in ("test", "te") && return :test
+    error("Unknown split '$name' (expected train|val|test)")
+end
+
+"""
+    filter_split(samples, split) -> Vector
+
+Keep rows whose `episode_id` belongs to `split`. Embargo 139 and 169 drop.
+Order is the file order — never shuffled. Rows without a parseable
+`episode_id` are dropped (not assigned by position).
+"""
+function filter_split(samples, split::Symbol)
+    out = empty(samples)
+    for sample in samples
+        episode_split(episode_index_of(sample)) === split && push!(out, sample)
+    end
+    return out
+end
+
+function reset_temporal!(bank::LIFBank)
+    fill!(bank.v, 0f0)
+    fill!(bank.pre_tr, 0f0)
+    fill!(bank.elig, 0f0)
+    fill!(bank.spikes, false)
+    return bank
 end
 
 # ── Fast-sigmoid surrogate gradient ───────────────────────────────────
@@ -336,8 +428,15 @@ function scale_rows_l2!(W::AbstractMatrix, cap::Float32)
 end
 
 # ── One training tick ─────────────────────────────────────────────────
+"""
+    tick!(bank, stim, reward, target=nothing; k=K_WTA)
+
+`k=nothing` is health eval (k=none): every neuron that crosses threshold
+stays a spike. Training keeps `k=K_WTA`.
+"""
 function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
-               target::Union{Vector{Float32},Nothing}=nothing)
+               target::Union{Vector{Float32},Nothing}=nothing;
+               k::Union{Int,Nothing}=K_WTA, learn::Bool=true)
     # 1. Poisson pre-spikes
     pre = Float32.(rand(Float32, N_CHANNELS) .< stim)
 
@@ -349,46 +448,50 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
     input = bank.weights * stim
     bank.v .= bank.decay .* bank.v .+ input
 
-    # 4. Fire, then K-WTA, then reset winners only
+    # 4. Fire, then optional K-WTA, then reset winners only
     bank.spikes .= bank.v .>= bank.thresh
-    apply_kwta!(bank.spikes, bank.v, K_WTA)
+    if k !== nothing
+        apply_kwta!(bank.spikes, bank.v, k)
+    end
     bank.v[bank.spikes] .= 0f0
 
-    # 5. STDP: LTP on co-activation, LTD when pre fired and post did not
-    @inbounds for i in 1:N_NEURONS
-        if bank.spikes[i]
-            bank.weights[i, :] .+= STDP_LTP .* pre_snap
-        else
-            bank.weights[i, :] .-= STDP_LTD .* pre
+    if learn
+        # 5. STDP: LTP on co-activation, LTD when pre fired and post did not
+        @inbounds for i in 1:N_NEURONS
+            if bank.spikes[i]
+                bank.weights[i, :] .+= STDP_LTP .* pre_snap
+            else
+                bank.weights[i, :] .-= STDP_LTD .* pre
+            end
         end
-    end
 
-    # 6. E-prop eligibility + signed reward (reward may be negative)
-    @inbounds for i in 1:N_NEURONS
-        dz = bank.spikes[i] ? 1f0 : surrogate(bank.v[i], bank.thresh[i])
-        bank.elig[i, :] .= TRACE_LAMBDA .* bank.elig[i, :] .+ pre_snap .* dz
-        bank.weights[i, :] .+= reward .* bank.elig[i, :] .* EPROP_LR
-    end
+        # 6. E-prop eligibility + signed reward (reward may be negative)
+        @inbounds for i in 1:N_NEURONS
+            dz = bank.spikes[i] ? 1f0 : surrogate(bank.v[i], bank.thresh[i])
+            bank.elig[i, :] .= TRACE_LAMBDA .* bank.elig[i, :] .+ pre_snap .* dz
+            bank.weights[i, :] .+= reward .* bank.elig[i, :] .* EPROP_LR
+        end
 
-    # 7. 16×3 readout: predict (hint, temp, power) from this tick's spikes.
-    #    Plain supervised delta rule — NOT reward-modulated. `reward` is signed
-    #    and goes negative on exactly the thermal/power rows this readout must
-    #    predict, so scaling by it ascends the error and trains the map
-    #    backwards. Reward modulation belongs on the e-prop path above (step 6).
-    if target !== nothing
-        s = Float32.(bank.spikes)
-        pred = bank.readout * s
-        err = target .- pred
-        bank.readout .+= READOUT_LR .* (err * s')
-        apply_dale_out!(bank.readout)
-    end
+        # 7. 16×3 readout: predict (comfort, temp, power) from this tick's spikes.
+        #    Plain supervised delta rule — NOT reward-modulated. `reward` is signed
+        #    and goes negative on exactly the thermal/power rows this readout must
+        #    predict, so scaling by it ascends the error and trains the map
+        #    backwards. Reward modulation belongs on the e-prop path above (step 6).
+        if target !== nothing
+            s = Float32.(bank.spikes)
+            pred = bank.readout * s
+            err = target .- pred
+            bank.readout .+= READOUT_LR .* (err * s')
+            apply_dale_out!(bank.readout)
+        end
 
-    # 8. Signed L2 cap on incoming weights (do **not** divide rows by sum — that
-    #    destroyed sign and collapsed every row onto the same simplex). Incoming
-    #    weights carry no E/I sign constraint: Dale lives on the outgoing side,
-    #    in step 7, so every neuron can be driven to threshold.
-    scale_rows_l2!(bank.weights, ROW_L2_CAP)
-    clamp!(bank.weights, W_MIN, W_MAX)
+        # 8. Signed L2 cap on incoming weights (do **not** divide rows by sum — that
+        #    destroyed sign and collapsed every row onto the same simplex). Incoming
+        #    weights carry no E/I sign constraint: Dale lives on the outgoing side,
+        #    in step 7, so every neuron can be driven to threshold.
+        scale_rows_l2!(bank.weights, ROW_L2_CAP)
+        clamp!(bank.weights, W_MIN, W_MAX)
+    end
 
     sum(bank.spikes)
 end
@@ -450,7 +553,27 @@ function load_chunked_dir(dir_path)
     samples
 end
 
+function _looks_like_parquet(path)
+    isfile(path) && endswith(lowercase(path), ".parquet") && return true
+    isdir(path) || return false
+    for entry in readdir(path)
+        endswith(lowercase(entry), ".parquet") && return true
+    end
+    return false
+end
+
 function load_data(data_path)
+    # Published v3 `state_telemetry` is parquet shards. This sidecar stays
+    # JSON3 + stdlib: it reads record-shaped JSONL with the five live fields.
+    # A converter is not bundled and timestamps are not invented.
+    if _looks_like_parquet(data_path)
+        error(
+            "Refusing parquet at $data_path. " *
+            "Ingest is JSONL records with mem_util_pct, power_w, gpu_temp_c, " *
+            "sm_clock_mhz, mem_clock_mhz, episode_id. " *
+            "Do not invent ts_utc. Do not silently train on *_derived."
+        )
+    end
     if isdir(data_path)
         load_chunked_dir(data_path)
     elseif isfile(data_path)
@@ -458,6 +581,27 @@ function load_data(data_path)
     else
         error("Data path not found: $data_path")
     end
+end
+
+"""
+    assert_legal_sensors!(samples)
+
+Fail if the corpus is `*_derived` / `tick_rate` with no live columns, so
+pointing the default path at qubic_ticks_snn cannot silently train on
+forbidden sensors. Mixed rows that already have the five live fields are
+allowed — `to_stimuli` ignores `*_derived` on those.
+"""
+function assert_legal_sensors!(samples)
+    n_live = count(is_state_telemetry, samples)
+    n_derived = count(s -> is_forbidden_derived(s) && !is_state_telemetry(s), samples)
+    if n_live == 0 && n_derived > 0
+        error(
+            "All $n_derived telemetry rows are *_derived / tick_rate " *
+            "(forbidden; exp-008). Pass v3 state_telemetry JSONL with " *
+            "mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz."
+        )
+    end
+    return samples
 end
 
 # ── Signed two's-complement Q8.8 ──────────────────────────────────────
@@ -506,6 +650,17 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
             "q88"            => "signed",
             "decay_semantics"=> "keep",
             "n_outputs"      => N_OUTPUTS,
+            "encoder"        => "v3_state_telemetry",
+            "legal_columns"  => collect(string.(LIVE_COLUMNS)),
+            "unused_axons"   => "5:15",
+            "frozen_minmax"  => Dict(string(k) => [lo, hi] for (k, (lo, hi)) in pairs(FROZEN_MINMAX)),
+            "frozen_lineage" => FROZEN_LINEAGE,
+            "episode_split"  => Dict(
+                "train"   => "gpu-000000..138",
+                "val"     => "gpu-000140..168",
+                "test"    => "gpu-000170..198",
+                "embargo" => [139, 169],
+            ),
         ))
     end
 
@@ -530,16 +685,63 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
     )
 end
 
+"""
+    health_eval(bank, samples) -> NamedTuple
+
+Forward pass with k=none (no K-WTA). Training may use k=4; health does not.
+Resets membrane at each `episode_id` boundary. Does not update weights.
+"""
+function health_eval(bank::LIFBank, samples)
+    reset_temporal!(bank)
+    total_spikes = 0
+    all16 = 0
+    inhib_spikes = 0
+    n_pat = Set{UInt32}()
+    prev_ep = nothing
+    for sample in samples
+        ep = episode_index_of(sample)
+        if ep !== prev_ep
+            reset_temporal!(bank)
+            prev_ep = ep
+        end
+        nspk = tick!(bank, to_stimuli(sample), 0f0, nothing; k=nothing, learn=false)
+        total_spikes += nspk
+        nspk == N_NEURONS && (all16 += 1)
+        inhib_spikes += count(bank.spikes[INHIB_ROWS])
+        bits = UInt32(0)
+        @inbounds for i in 1:N_NEURONS
+            bank.spikes[i] && (bits |= UInt32(1) << (i - 1))
+        end
+        push!(n_pat, bits)
+    end
+    n = max(length(samples), 1)
+    return (
+        n = length(samples),
+        spk_per_tick = total_spikes / n,
+        all16_frac = all16 / n,
+        patterns = length(n_pat),
+        inhib_spikes = inhib_spikes,
+        k = "none",
+    )
+end
+
 # ── Main ──────────────────────────────────────────────────────────────
 function main(args=ARGS)
     length(args) >= 1 || error(
-        "Usage: julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir]\n" *
-        "  data_path: prefer qubic_ticks_snn.jsonl (~27430 rows), not fresh_sync (8).\n" *
-        "  example:   julia scripts/spikenaut_train.jl $DEFAULT_27K 20 /tmp/spikenaut-out"
+        "Usage: julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir] [split]\n" *
+        "  data_path: v3 state_telemetry JSONL (5 live columns + episode_id).\n" *
+        "  live:      mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz\n" *
+        "  frozen:    mem_util 0..75; power 8.527..302.845; temp 0..69;\n" *
+        "             sm 180..2910; memclk 405..14801  (train, lineage $FROZEN_LINEAGE)\n" *
+        "  holdout:   train gpu-000000..138; val 140..168; test 170..198;\n" *
+        "             embargo 139 and 169. Never shuffle across episodes.\n" *
+        "  unused:    axons 5..15 held at 0 (width, not fake channels).\n" *
+        "  example:   julia scripts/spikenaut_train.jl $DEFAULT_V3_JSONL 20 /tmp/spikenaut-out train"
     )
     data_path = args[1]
     epochs    = length(args) >= 2 ? parse(Int, args[2]) : 20
     out_dir   = length(args) >= 3 ? args[3] : "out_train"
+    split     = length(args) >= 4 ? parse_split(args[4]) : :train
 
     isdir(data_path) || isfile(data_path) || error("Data path not found: $data_path")
     mkpath(out_dir)
@@ -548,19 +750,37 @@ function main(args=ARGS)
     println("Data   : $data_path")
     println("Epochs : $epochs")
     println("Out    : $out_dir")
-    println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory; K-WTA k=$K_WTA")
+    println("Split  : $split  (train gpu-000000..138 / val 140..168 / test 170..198; embargo 139,169)")
+    println("Live   : mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz")
+    println("Scale  : frozen train minmax lineage=$FROZEN_LINEAGE; axons 5..15 unused=0")
+    println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory (outgoing readout); incoming W unsigned")
+    println("K-WTA  : train k=$K_WTA; health eval k=none")
     println("Decay  : keep=$DECAY  (Rust leak = $(1 - DECAY))")
 
     print("Loading samples... ")
-    samples = load_data(data_path)
-    println("$(length(samples)) total records")
-    isempty(samples) && error("No valid samples found.")
+    loaded = load_data(data_path)
+    println("$(length(loaded)) total records")
+    isempty(loaded) && error("No valid samples found.")
+    assert_legal_sensors!(loaded)
+
+    has_episodes = any(s -> episode_index_of(s) !== nothing, loaded)
+    samples = if has_episodes
+        filter_split(loaded, split)
+    else
+        collect(loaded)
+    end
+    if has_episodes
+        println("Holdout : $(length(samples)) $split rows (file order, no shuffle)")
+        isempty(samples) && error("No rows in split $split after embargo filter.")
+    elseif any(is_state_telemetry, loaded)
+        error("v3 state_telemetry rows need episode_id for the session holdout. " *
+              "Refusing to invent a split or a timestamp.")
+    end
     if length(samples) < MIN_TRAIN_N
-        @warn "Only $(length(samples)) records — monotonic / collapsed weights are likely. Prefer $DEFAULT_27K (~27430)."
+        @warn "Only $(length(samples)) records — monotonic / collapsed weights are likely."
     end
 
     bank = LIFBank()
-    enc  = StimEncoder()
 
     for epoch in 1:epochs
         total_reward = 0f0
@@ -568,21 +788,23 @@ function main(args=ARGS)
         max_spikes   = 0
 
         # Every piece of per-tick temporal state resets together. Clearing only
-        # `v` and the encoder left `pre_tr`/`elig`/`spikes` carrying the tail of
-        # the previous replay, so epoch 2+ opened with neutral encoder deltas but
-        # stale eligibility — making multi-epoch weights depend on that leak.
-        fill!(bank.v, 0f0)
-        fill!(bank.pre_tr, 0f0)
-        fill!(bank.elig, 0f0)
-        fill!(bank.spikes, false)
-        enc.initialized = false
+        # `v` left `pre_tr`/`elig`/`spikes` carrying the tail of the previous
+        # replay, so epoch 2+ opened with stale eligibility.
+        reset_temporal!(bank)
+        prev_ep = nothing
 
         t0 = time()
         for sample in samples
-            stim   = to_stimuli(sample, enc)
+            ep = episode_index_of(sample)
+            if ep !== prev_ep
+                # Membrane reset at episode_id (exp-010). Do not cross sessions.
+                reset_temporal!(bank)
+                prev_ep = ep
+            end
+            stim   = to_stimuli(sample)
             reward = sample_reward(sample)
             target = sample_readout_target(sample)
-            nspk   = tick!(bank, stim, reward, target)
+            nspk   = tick!(bank, stim, reward, target; k=K_WTA)
             total_spikes += nspk
             max_spikes    = max(max_spikes, nspk)
             total_reward += reward
@@ -603,13 +825,19 @@ function main(args=ARGS)
                 epoch, epochs, avg_r, s_rate, max_spikes, w_mean, w_std, w_min, w_max, n_inh, ms_tick)
     end
 
+    if any(is_state_telemetry, samples)
+        h = health_eval(bank, samples)
+        @printf("Health k=none | n=%d | spk/tick=%.3f | all-16=%.3f | patterns=%d | I_spikes=%d\n",
+                h.n, h.spk_per_tick, h.all16_frac, h.patterns, h.inhib_spikes)
+    end
+
     paths = export_artifacts(bank, out_dir)
     println("\nExported:")
     for p in paths
         println("  $p")
     end
     println("Hidden weights: min=$(minimum(bank.weights)) max=$(maximum(bank.weights)) std=$(std(bank.weights))")
-    println("SUCCESS: Spikenaut trained (signed E/I + K-WTA + signed Q8.8).")
+    println("SUCCESS: Spikenaut trained (v3 live encoder + outgoing Dale + K-WTA + signed Q8.8).")
     return bank
 end
 
