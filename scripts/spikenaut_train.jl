@@ -40,6 +40,7 @@
 # `dataset/merged_v2/`. K-WTA stays on in training. Health eval is k=none
 # on test gpu-000170..198 (mean pairwise cofire + all-16 + I spikes).
 # Errors if the JSONL has no test episodes — will not silently eval train.
+# health_eval deep-copies the bank so export membrane stays post-train.
 
 using JSON3, LinearAlgebra, Printf, Random, Statistics
 
