@@ -117,7 +117,7 @@ Any function that takes that output and returns a scalar loss is a valid loss fu
 
 ## Spikenaut sidecar (`scripts/spikenaut_train.jl`)
 
-Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` has no E/I sign. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes). Training stays on the CLI split (default train). A JSONL with no test episodes errors instead of silently evaluating train.
+Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` has no E/I sign. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes) and does not mutate the bank that `export_artifacts` serializes. CLI split must be **train** (default); `val` / `test` error instead of `tick!(learn=true)` on the holdout. A JSONL with no test episodes errors instead of silently evaluating train. JSON `null` on a live key still counts; the value encodes as 0 (T=0 stays 0).
 
 It trains on the **legal v3 `state_telemetry` encoder**, not `qubic_ticks_snn` `*_derived` columns (those are a closed form of `tick_rate`; Spikenaut Scientist exp-008, 0 mismatches / 27430). Pointing the sidecar at derived-only JSONL errors instead of silently training on forbidden sensors.
 
@@ -161,7 +161,7 @@ julia --project=scripts scripts/spikenaut_train.jl \
 
 Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Do not export weights to Hugging Face and do not write `rmems/Spikenaut-SNN` `dataset/merged_v2/` from this path.
 
-Cite: **Spikenaut Scientist** · exp-008..013.
+Cite: **Spikenaut Scientist** · exp-008..014.
 
 ## Integration
 

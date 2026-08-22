@@ -6,6 +6,7 @@ using LinearAlgebra
 using Random
 using Statistics
 using Zygote
+using JSON3
 
 # Top-level mock model (structs cannot be defined inside @testset local scope).
 mutable struct MockSNN
@@ -354,6 +355,23 @@ end
             @test ood_stim[1] == 1f0
             @test ood_stim[3] == 1f0
             @test ood_stim[5] == 1f0
+
+            # Live KEY presence, not value. JSON null on the first live
+            # column must not refuse the row (exp-014). Null encodes as 0.
+            null_first = JSON3.read(
+                "{\"mem_util_pct\":null,\"power_w\":8.527000427246094," *
+                "\"gpu_temp_c\":34.5,\"sm_clock_mhz\":1545,\"mem_clock_mhz\":405}"
+            )
+            @test is_state_telemetry(null_first)
+            @test rec_has(null_first, :mem_util_pct)
+            @test rec_get(null_first, :mem_util_pct) === nothing
+            null_stim = to_stimuli(null_first)
+            @test null_stim[1] == 0f0
+            @test null_stim[2] ≈ 0f0
+            @test null_stim[3] ≈ 0.5f0
+            @test null_stim[4] ≈ 0.5f0
+            @test null_stim[5] ≈ 0f0
+            @test all(==(0f0), null_stim[6:16])
         end
 
         @testset "episode holdout (no row shuffle)" begin
@@ -392,6 +410,9 @@ end
             @test health_rows != tr
             @test_throws ErrorException require_test_split(tr)
             @test_throws ErrorException require_test_split([Dict(:mem_util_pct => 1)])
+            @test require_train_cli_split(:train) === :train
+            @test_throws ErrorException require_train_cli_split(:val)
+            @test_throws ErrorException require_train_cli_split(:test)
         end
 
         @testset "legacy spikes still work" begin
@@ -480,6 +501,9 @@ end
             eval_bank.weights .= 0.4f0
             n_none = tick!(eval_bank, fill(1f0, N_CHANNELS), 0f0, nothing; k=nothing, learn=false)
             @test n_none >= 0
+            eval_bank.v .= 0.42f0
+            v_before = copy(eval_bank.v)
+            spikes_before = copy(eval_bank.spikes)
             h = health_eval(eval_bank, [Dict(
                 :episode_id => "gpu-000170",
                 :mem_util_pct => 75, :power_w => 302.8450012207031,
@@ -489,6 +513,15 @@ end
             @test h.n == 1
             @test haskey(h, :cofire)
             @test h.cofire >= 0
+            # health_eval must not overwrite the post-train membrane that
+            # export_artifacts writes into snn_model.json (exp-014).
+            @test eval_bank.v == v_before
+            @test eval_bank.spikes == spikes_before
+            mktempdir() do dir
+                export_artifacts(eval_bank, dir)
+                model = JSON3.read(read(joinpath(dir, "snn_model.json"), String))
+                @test all(n -> Float32(n.membrane_potential) == 0.42f0, model.neurons)
+            end
 
             # Mean pairwise cofire (cosine, silent neurons excluded).
             # All-16 every tick → 1.0. Four disjoint k=4 groups → 0.20.
@@ -535,6 +568,8 @@ end
                 only_train = joinpath(dir, "train_only.jsonl")
                 write(only_train, join(readlines(fixture)[1:2], "\n") * "\n")
                 @test_throws ErrorException main([only_train, "1", joinpath(dir, "out-train")])
+                @test_throws ErrorException main([fixture, "1", joinpath(dir, "out-val"), "val"])
+                @test_throws ErrorException main([fixture, "1", joinpath(dir, "out-test"), "test"])
 
                 # Full fixture has test episodes: train on train, eval n == test n.
                 out = joinpath(dir, "out-full")

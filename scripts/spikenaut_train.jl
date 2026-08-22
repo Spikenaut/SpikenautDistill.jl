@@ -27,6 +27,7 @@
 #
 # Usage:
 #   julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir] [split]
+#   split must be train (default). val/test error — no learn=true on holdout.
 #   julia scripts/spikenaut_train.jl \
 #     /path/to/state_telemetry.jsonl \
 #     20 /tmp/spikenaut-out train
@@ -168,6 +169,21 @@ function rec_get(sample, names::Symbol...)
     return nothing
 end
 
+"""
+    rec_has(sample, names...) -> Bool
+
+True when any named **key** is present, including a JSON `null` value.
+`rec_get` cannot be used for this: a present null returns `nothing` and
+looks like a missing key.
+"""
+function rec_has(sample, names::Symbol...)
+    for name in names
+        haskey(sample, name) && return true
+        haskey(sample, String(name)) && return true
+    end
+    return false
+end
+
 function rec_f32(sample, default::Float32, names::Symbol...)
     v = rec_get(sample, names...)
     v === nothing && return default
@@ -208,11 +224,12 @@ end
 """
     is_state_telemetry(sample) -> Bool
 
-True when the record carries any of the five legal live columns.
+True when the record has any of the five legal live **keys**.
+A JSON `null` still counts — the value encodes as 0 (T=0 stays 0).
 `*_derived` / `tick_rate` do **not** count — those are forbidden sensors.
 """
 function is_state_telemetry(sample)
-    rec_get(sample, LIVE_COLUMNS...) !== nothing
+    rec_has(sample, LIVE_COLUMNS...)
 end
 
 """
@@ -346,6 +363,22 @@ function parse_split(name::AbstractString)
     n in ("val", "validation", "valid") && return :val
     n in ("test", "te") && return :test
     error("Unknown split '$name' (expected train|val|test)")
+end
+
+"""
+    require_train_cli_split(split) -> :train
+
+CLI may only train on `:train`. `:val` / `:test` are holdout — refusing
+`tick!(learn=true)` on them. Health eval is always k=none on test via
+[`require_test_split`](@ref), independent of this argv.
+"""
+function require_train_cli_split(split::Symbol)
+    split === :train || error(
+        "CLI split must be train (got $split). " *
+        "val/test are holdout; refusing tick!(learn=true) on them. " *
+        "Health eval stays k=none on test via require_test_split."
+    )
+    return split
 end
 
 """
@@ -739,11 +772,15 @@ end
 Forward pass with k=none (no K-WTA). Training may use k=4; health does not.
 Resets membrane at each `episode_id` boundary. Does not update weights.
 
+Deep-copies `bank` so `snn_model.json` `membrane_potential` stays
+**post-train**, not post-test. Weights are already safe (`learn=false`).
+
 Call with the **test** split (`gpu-000170..198`). The CLI default train
 filter must not be passed here — train health leaks and cannot close the
 exp-009 bar (cofire 0.891 / all-16 0.311).
 """
 function health_eval(bank::LIFBank, samples)
+    bank = deepcopy(bank)
     reset_temporal!(bank)
     total_spikes = 0
     all16 = 0
@@ -804,12 +841,13 @@ function main(args=ARGS)
         "  unused:    axons 5..15 held at 0 (width, not fake channels).\n" *
         "  health:    k=none on test gpu-000170..198 (cofire, all-16, I spikes).\n" *
         "             Errors if the JSONL has no test episodes.\n" *
+        "  split:     train only (default). val/test error — no learn=true on holdout.\n" *
         "  example:   julia scripts/spikenaut_train.jl $DEFAULT_V3_JSONL 20 /tmp/spikenaut-out train"
     )
     data_path = args[1]
     epochs    = length(args) >= 2 ? parse(Int, args[2]) : 20
     out_dir   = length(args) >= 3 ? args[3] : "out_train"
-    split     = length(args) >= 4 ? parse_split(args[4]) : :train
+    split     = require_train_cli_split(length(args) >= 4 ? parse_split(args[4]) : :train)
 
     isdir(data_path) || isfile(data_path) || error("Data path not found: $data_path")
     mkpath(out_dir)
