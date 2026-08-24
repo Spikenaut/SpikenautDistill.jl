@@ -1,0 +1,25 @@
+src/training.jl
+  s_d371a3f3d4c921::t_e024cd25ad4326 81-85
+README.md
+  s_d371a3f3d4c921::t_e024cd25ad4326 101-102
+src/rules/ottt.jl
+  s_d371a3f3d4c921::t_e024cd25ad4326 19
+src/rules/eprop.jl
+  s_d371a3f3d4c921::t_e024cd25ad4326 32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "42b52f225c807d37a0deac426a8bcf713a85baa0",
+  "prompts": {},
+  "sessions": {
+    "s_d371a3f3d4c921": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df9a825f-67a2-40fd-8205-1acbca549b9a",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
