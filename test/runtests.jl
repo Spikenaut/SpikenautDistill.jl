@@ -500,7 +500,7 @@ end
             eval_bank = LIFBank()
             eval_bank.weights .= 0.4f0
             n_none = tick!(eval_bank, fill(1f0, N_CHANNELS), 0f0, nothing; k=nothing, learn=false)
-            @test n_none >= 0
+            @test n_none == N_NEURONS
             eval_bank.v .= 0.42f0
             v_before = copy(eval_bank.v)
             spikes_before = copy(eval_bank.spikes)

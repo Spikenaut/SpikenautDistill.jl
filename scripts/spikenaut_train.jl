@@ -334,7 +334,7 @@ Parse `gpu-000138` → 138. Does not invent an index from row order or time.
 function episode_index(id)
     id === nothing && return nothing
     s = String(id)
-    m = match(r"gpu-(\d+)$", s)
+    m = match(r"^gpu-(\d+)$", s)
     m === nothing && return nothing
     return parse(Int, m.captures[1])
 end
@@ -388,11 +388,28 @@ end
 Keep rows whose `episode_id` belongs to `split`. Embargo 139 and 169 drop.
 Order is the file order — never shuffled. Rows without a parseable
 `episode_id` are dropped (not assigned by position).
+
+Errors if an `episode_id` reappears after another episode intervened. The
+training loop and [`health_eval`](@ref) reset temporal state on
+`ep !== prev_ep`, which is only an episode boundary when rows are grouped
+by episode — interleaved rows are refused, never re-sorted.
 """
 function filter_split(samples, split::Symbol)
     out = empty(samples)
+    seen = Set{Int}()
+    prev = nothing
     for sample in samples
-        episode_split(episode_index_of(sample)) === split && push!(out, sample)
+        e = episode_index_of(sample)
+        episode_split(e) === split || continue
+        if e !== prev
+            e in seen && error(
+                "episode_id $e is not contiguous in file order for split $split. " *
+                "Temporal reset needs grouped episodes; refusing interleaved rows."
+            )
+            push!(seen, e)
+            prev = e
+        end
+        push!(out, sample)
     end
     return out
 end
@@ -643,19 +660,21 @@ end
 """
     assert_legal_sensors!(samples)
 
-Fail if the corpus is `*_derived` / `tick_rate` with no live columns, so
-pointing the default path at qubic_ticks_snn cannot silently train on
-forbidden sensors. Mixed rows that already have the five live fields are
-allowed — `to_stimuli` ignores `*_derived` on those.
+Fail if **any** row is `*_derived` / `tick_rate` without live columns, so
+pointing the default path at qubic_ticks_snn — or dropping a handful of
+live rows into a derived corpus — cannot silently train on forbidden
+sensors. Rows that already have the five live fields are allowed —
+`to_stimuli` ignores `*_derived` on those.
 """
 function assert_legal_sensors!(samples)
     n_live = count(is_state_telemetry, samples)
     n_derived = count(s -> is_forbidden_derived(s) && !is_state_telemetry(s), samples)
-    if n_live == 0 && n_derived > 0
+    if n_derived > 0
         error(
-            "All $n_derived telemetry rows are *_derived / tick_rate " *
-            "(forbidden; exp-008). Pass v3 state_telemetry JSONL with " *
-            "mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz."
+            "$n_derived of $(n_live + n_derived) telemetry rows are " *
+            "*_derived / tick_rate (forbidden; exp-008). Pass v3 " *
+            "state_telemetry JSONL with mem_util_pct, power_w, gpu_temp_c, " *
+            "sm_clock_mhz, mem_clock_mhz."
         )
     end
     return samples
@@ -681,7 +700,7 @@ function write_mem(path, values)
     end
 end
 
-function export_artifacts(bank::LIFBank, out_dir::AbstractString)
+function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=true)
     mkpath(out_dir)
     neurons_json = [
         Dict(
@@ -695,30 +714,35 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString)
         )
         for i in 1:N_NEURONS
     ]
+    model = Dict{String, Any}(
+        "neurons"        => neurons_json,
+        "source"         => "spikenaut_julia",
+        "ei_ratio"       => "80:20",
+        # E/I sign lives on each neuron's outgoing projection
+        # (`output_weights`), not on its incoming `weights` row.
+        "dale"           => "outgoing",
+        "k_wta"          => K_WTA,
+        "q88"            => "signed",
+        "decay_semantics"=> "keep",
+        "n_outputs"      => N_OUTPUTS,
+        # A legacy `spikes` / `inputs` run never touched the v3 encoder; do
+        # not stamp it (or its frozen scale / holdout) onto the artifact.
+        "encoder"        => used_v3 ? "v3_state_telemetry" : "legacy_spikes",
+        "legal_columns"  => collect(string.(LIVE_COLUMNS)),
+        "unused_axons"   => "5:15",
+    )
+    if used_v3
+        model["frozen_minmax"]  = Dict(string(k) => [lo, hi] for (k, (lo, hi)) in pairs(FROZEN_MINMAX))
+        model["frozen_lineage"] = FROZEN_LINEAGE
+        model["episode_split"]  = Dict(
+            "train"   => "gpu-000000..138",
+            "val"     => "gpu-000140..168",
+            "test"    => "gpu-000170..198",
+            "embargo" => [139, 169],
+        )
+    end
     open(joinpath(out_dir, "snn_model.json"), "w") do f
-        JSON3.write(f, Dict(
-            "neurons"        => neurons_json,
-            "source"         => "spikenaut_julia",
-            "ei_ratio"       => "80:20",
-            # E/I sign lives on each neuron's outgoing projection
-            # (`output_weights`), not on its incoming `weights` row.
-            "dale"           => "outgoing",
-            "k_wta"          => K_WTA,
-            "q88"            => "signed",
-            "decay_semantics"=> "keep",
-            "n_outputs"      => N_OUTPUTS,
-            "encoder"        => "v3_state_telemetry",
-            "legal_columns"  => collect(string.(LIVE_COLUMNS)),
-            "unused_axons"   => "5:15",
-            "frozen_minmax"  => Dict(string(k) => [lo, hi] for (k, (lo, hi)) in pairs(FROZEN_MINMAX)),
-            "frozen_lineage" => FROZEN_LINEAGE,
-            "episode_split"  => Dict(
-                "train"   => "gpu-000000..138",
-                "val"     => "gpu-000140..168",
-                "test"    => "gpu-000170..198",
-                "embargo" => [139, 169],
-            ),
-        ))
+        JSON3.write(f, model)
     end
 
     write_mem(joinpath(out_dir, "parameters.mem"), bank.thresh)
@@ -946,7 +970,7 @@ function main(args=ARGS)
                 h.n, h.spk_per_tick, h.all16_frac, h.cofire, h.patterns, h.inhib_spikes)
     end
 
-    paths = export_artifacts(bank, out_dir)
+    paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded))
     println("\nExported:")
     for p in paths
         println("  $p")
