@@ -401,6 +401,19 @@ end
             # Missing episode_id is dropped, not invented.
             @test filter_split([Dict(:mem_util_pct => 1)], :train) == []
 
+            # A row from another split still breaks adjacency: train ep0 /
+            # test ep170 / train ep0 would put the two ep0 fragments next to
+            # each other in the output, so the `ep !== prev_ep` reset would
+            # never fire between them. Refuse it.
+            interleaved = [
+                Dict(:episode_id => "gpu-000000", :mem_util_pct => 1),
+                Dict(:episode_id => "gpu-000170", :mem_util_pct => 2),
+                Dict(:episode_id => "gpu-000000", :mem_util_pct => 3),
+            ]
+            @test_throws ErrorException filter_split(interleaved, :train)
+            # Six digits or nothing: `gpu-150` is unparseable, not episode 150.
+            @test episode_index("gpu-150") === nothing
+
             # Health must use test, never the already-filtered train split.
             health_rows = require_test_split(rows)
             @test length(health_rows) == 2

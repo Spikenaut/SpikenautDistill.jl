@@ -334,7 +334,7 @@ Parse `gpu-000138` → 138. Does not invent an index from row order or time.
 function episode_index(id)
     id === nothing && return nothing
     s = String(id)
-    m = match(r"^gpu-(\d+)$", s)
+    m = match(r"^gpu-(\d{6})$", s)
     m === nothing && return nothing
     return parse(Int, m.captures[1])
 end
@@ -400,16 +400,22 @@ function filter_split(samples, split::Symbol)
     prev = nothing
     for sample in samples
         e = episode_index_of(sample)
-        episode_split(e) === split || continue
+        keep = episode_split(e) === split
+        # `prev` advances on EVERY row, including rows of other splits. A
+        # skipped row still breaks adjacency, so train ep0 / test ep170 /
+        # train ep0 must be refused: the two ep0 fragments land next to each
+        # other in `out` and the downstream `ep !== prev_ep` reset never fires.
         if e !== prev
-            e in seen && error(
-                "episode_id $e is not contiguous in file order for split $split. " *
-                "Temporal reset needs grouped episodes; refusing interleaved rows."
-            )
-            push!(seen, e)
+            if keep
+                e in seen && error(
+                    "episode_id $e is not contiguous in file order for split $split. " *
+                    "Temporal reset needs grouped episodes; refusing interleaved rows."
+                )
+                push!(seen, e)
+            end
             prev = e
         end
-        push!(out, sample)
+        keep && push!(out, sample)
     end
     return out
 end
@@ -728,10 +734,13 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=
         # A legacy `spikes` / `inputs` run never touched the v3 encoder; do
         # not stamp it (or its frozen scale / holdout) onto the artifact.
         "encoder"        => used_v3 ? "v3_state_telemetry" : "legacy_spikes",
-        "legal_columns"  => collect(string.(LIVE_COLUMNS)),
-        "unused_axons"   => "5:15",
     )
     if used_v3
+        # v3-only channel metadata. The legacy `spikes` / `inputs` branch of
+        # `to_stimuli` fills up to all 16 channels, so claiming only the 5 v3
+        # columns are legal (and 5:15 unused) would be wrong there.
+        model["legal_columns"] = collect(string.(LIVE_COLUMNS))
+        model["unused_axons"]  = "5:15"
         model["frozen_minmax"]  = Dict(string(k) => [lo, hi] for (k, (lo, hi)) in pairs(FROZEN_MINMAX))
         model["frozen_lineage"] = FROZEN_LINEAGE
         model["episode_split"]  = Dict(
