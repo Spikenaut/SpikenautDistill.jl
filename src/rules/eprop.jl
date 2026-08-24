@@ -21,7 +21,6 @@ function update_eprop!(model, spikes::SpikeBatch, loss, output; trace_lambda = 0
 
     # 1. Get learning signals (error term) from the loss.
     # This is a simplified view; the actual calculation depends on the model structure.
-    learning_signal = Zygote.gradient(() -> loss, Zygote.params(output))[1]
 
     # 2. Update eligibility traces.
     # This would involve using the presynaptic spikes and postsynaptic activity (or surrogate gradients).
@@ -29,12 +28,6 @@ function update_eprop!(model, spikes::SpikeBatch, loss, output; trace_lambda = 0
 
     # 3. Compute gradients.
     # The gradient for a weight w_ij would be learning_signal_i * e_ij
-    
-    println("Calculating e-prop gradients (not fully implemented).")
-    
-    # This is a placeholder for the gradients.
-    # A real implementation would return a gradient structure compatible with the optimizer.
-    dummy_gradients = randn(Float32, size(model.weights)) * 0.01f0
 
-    return dummy_gradients
+    error("update_eprop!: the e-prop learning rule is not yet implemented.")
 end

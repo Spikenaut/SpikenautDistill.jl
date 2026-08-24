@@ -98,8 +98,8 @@ For a complete, runnable example, see [`examples/hybrid_moe_training.jl`](exampl
 
 ## Available Rules
 
-- `:eprop`: Eligibility propagation.
-- `:ottt`: Online Spatio-Temporal Trace Training.
+- `:eprop`: Eligibility propagation. **Stub** — currently only logs the rule name; `train_step!` does not apply the eligibility-trace update.
+- `:ottt`: Online Spatio-Temporal Trace Training. **Stub** — currently only logs the rule name; `train_step!` does not apply the OTTT update.
 
 ## Custom Model Steps and Loss Functions
 

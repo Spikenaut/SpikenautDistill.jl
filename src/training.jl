@@ -78,6 +78,11 @@ Perform one online training step using the chosen rule.
   `(model, spikes::SpikeBatch) -> output`.
 
 Returns: A tuple of `(updated_model, TrainingState)`.
+
+`rule` currently only selects a log message (`:eprop`/`:ottt`); no rule-specific
+update is applied and `model` is returned unmodified. `TrainingState.gradients`
+holds the raw Zygote gradients — callers must apply them (e.g. via `optimizer`)
+to actually update `model`.
 """
 function train_step!(model, spikes::SpikeBatch, loss_fn;
                      forward_fn = nothing,
