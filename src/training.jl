@@ -24,9 +24,10 @@ Plain `Function`s and other callable objects are also accepted by `train_step!`.
 """
 abstract type ModelStep end
 
-function default_optimizer(lr::Real = 0.001f0)
-    lr32 = Float32(lr)
-    return (params, grads) -> params .-= lr32 .* grads
+# A placeholder for a default optimizer.
+function default_optimizer()
+    # In a real scenario, this would return a configured optimizer from a library like Optimisers.jl.
+    return (params, grads) -> params .-= 0.001f0 .* grads
 end
 
 """
@@ -48,6 +49,7 @@ function validate_model_step(model_step)
     model_step === nothing && throw(ArgumentError(
         "`forward_fn` is required; pass a callable `(model, spikes::SpikeBatch) -> output` to `train_step!`."))
 
+    # Accept Function, ModelStep subtypes, or any object that has methods (callable).
     if model_step isa Function || model_step isa ModelStep
         return model_step
     end
@@ -67,61 +69,63 @@ end
     train_step!(model, spikes::SpikeBatch, loss_fn; forward_fn, rule=:eprop, kwargs...)
     train_step!(model, spikes::SpikeBatch, loss_fn, model_step; rule=:eprop, kwargs...)
 
-One online step. Computes the scalar loss through the injected model step,
-builds e-prop or OTTT gradients from the spike train, and **applies** them
-to `model.weights`.
+Perform one online training step using the chosen rule.
 
-Keyword arguments:
-- `forward_fn` / positional `model_step`: `(model, spikes) -> output`
-- `rule`: `:eprop` or `:ottt`
-- `optimizer`: `(params, grads) -> ...` (default SGD, `lr=0.001`)
-- `traces`: optional [`TraceBatch`](@ref) carried from the previous step
-- `trace_lambda`: eligibility / OTTT leak (default `0.95`)
+- `model`: Your SNN model.
+- `spikes`: A `SpikeBatch` containing spike trains and optional targets.
+- `loss_fn`: A function that takes the model output and computes a scalar loss.
+- `forward_fn` / `model_step`: A caller-provided callable with signature
+  `(model, spikes::SpikeBatch) -> output`.
 
-Returns `(updated_model, TrainingState)` with `state.gradients` and
-`state.traces` set.
+Returns: A tuple of `(updated_model, TrainingState)`.
+
+`rule` currently only selects a log message (`:eprop`/`:ottt`); no rule-specific
+update is applied and `model` is returned unmodified. `TrainingState.gradients`
+holds the raw Zygote gradients — callers must apply them (e.g. via `optimizer`)
+to actually update `model`.
 """
 function train_step!(model, spikes::SpikeBatch, loss_fn;
                      forward_fn = nothing,
                      rule::Symbol = :eprop,
                      optimizer = default_optimizer(),
-                     traces = nothing,
                      kwargs...)
 
     model_step = validate_model_step(forward_fn)
-    output_ref = Ref{Any}(nothing)
 
+    # Differentiate through the injected model step so gradients depend on model params.
+    # Zygote.withgradient returns a NamedTuple `(val, grad)`.
     result = Zygote.withgradient(model) do m
         output = model_step(m, spikes)
-        Zygote.ignore_derivatives() do
-            output_ref[] = output
-        end
         loss_fn(output)
     end
     loss = result.val
+    # withgradient(model) returns grad as a 1-tuple (one entry per AD argument).
     g = result.grad
-    zygote_grads = g === nothing ? nothing : (g isa Tuple ? g[1] : g)
+    grads = g === nothing ? nothing : (g isa Tuple ? g[1] : g)
 
     loss isa Number || throw(ArgumentError(
         "`loss_fn` must return a numeric scalar, got $(typeof(loss))."))
     loss = Float32(loss)
-    output = output_ref[]
 
-    rule_grads, new_traces = if rule === :eprop
-        update_eprop!(model, spikes, loss, output;
-                      traces = traces, loss_fn = loss_fn, kwargs...)
-    elseif rule === :ottt
-        update_ottt!(model, spikes, loss, output;
-                     traces = traces, loss_fn = loss_fn, kwargs...)
-    elseif rule === :surrogate
-        (zygote_grads, traces)
+    # Apply the chosen learning rule.
+    if rule == :eprop
+        # The `update_eprop!` function will calculate eligibility traces and gradients.
+        # update_eprop!(model, spikes, loss, output; kwargs...)
+        println("Applying e-prop rule (not fully implemented).")
+    elseif rule == :ottt
+        # update_ottt!(model, spikes, loss; kwargs...)
+        println("Applying OTTT rule (not fully implemented).")
     else
         error("Unknown training rule: `$rule`")
     end
 
-    apply_weight_update!(model, rule_grads, optimizer)
+    # Apply gradients (this is a simplified view).
+    # In a real implementation, the rule-specific function would return gradients
+    # to be applied here.
+    # optimizer(... , grads)
 
-    state = TrainingState(loss = loss, traces = new_traces, gradients = rule_grads)
+    # Return the updated model and training state.
+    state = TrainingState(loss=loss, gradients=grads)
     return model, state
 end
 

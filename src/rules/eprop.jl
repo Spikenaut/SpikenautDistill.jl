@@ -1,39 +1,33 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 """
-Eligibility-propagation (e-prop) for a linear readout on spike trains.
-
-`e_j[t] = λ e_j[t-1] + pre_j[t]`, then `∂L/∂W_ij ≈ L_i * ē_j`.
-`L = ∂L/∂logits` from the caller loss. No membrane state is required; the
-surrogate lives in the injected model step / Zygote path when the caller
-uses one.
+Implementation of the e-prop learning rule.
 """
 
 """
-    update_eprop!(model, spikes, loss, output; traces, trace_lambda, loss_fn, kwargs...)
+    update_eprop!(model, spikes, loss, output; kwargs...)
 
-Return `(gradients, traces)` where `gradients` is `n_out × n_pre` matching
-`model.weights`. `traces` is a [`TraceBatch`](@ref) carrying the pre-trace
-so the next tick can continue the eligibility filter.
+Calculate eligibility traces and gradients for the e-prop learning rule.
+
+This is a placeholder implementation. A real implementation would involve:
+- Maintaining eligibility traces for each synapse.
+- Calculating the learning signal based on the loss.
+- Computing the gradient as the product of the learning signal and the traces.
+- Returning the gradients to be applied by the optimizer in `train_step!`.
 """
-function update_eprop!(model, spikes::SpikeBatch, loss, output;
-                       traces = nothing,
-                       trace_lambda::Real = 0.95f0,
-                       loss_fn = nothing,
-                       kwargs...)
-    W = _weights(model)
-    n_out, n_pre = size(W)
-    S = _spike_matrix(spikes, n_pre)
-    λ = Float32(trace_lambda)
+function update_eprop!(model, spikes::SpikeBatch, loss, output; trace_lambda = 0.95f0, kwargs...)
+    # In a real implementation, you would access the model's internal state 
+    # (e.g., membrane potentials, traces) to perform these calculations.
 
-    carry = nothing
-    if traces isa TraceBatch && traces.traces isa NamedTuple && haskey(traces.traces, :pre)
-        carry = traces.traces.pre
-    end
+    # 1. Get learning signals (error term) from the loss.
+    # This is a simplified view; the actual calculation depends on the model structure.
 
-    y, mean_y, _ = _presynaptic_traces(S, λ, carry)
-    L = loss_fn === nothing ? ones(Float32, n_out) : _learning_signal(loss_fn, output, n_out)
-    grads = L * mean_y'                          # n_out × n_pre
-    new_traces = TraceBatch((pre = y, eligibility = grads, rule = :eprop))
-    return grads, new_traces
+    # 2. Update eligibility traces.
+    # This would involve using the presynaptic spikes and postsynaptic activity (or surrogate gradients).
+    # For example: e_ij[t] = λ * e_ij[t-1] + presynaptic_spike[j] * surrogate_gradient(v_i[t])
+
+    # 3. Compute gradients.
+    # The gradient for a weight w_ij would be learning_signal_i * e_ij
+
+    error("update_eprop!: the e-prop learning rule is not yet implemented.")
 end
