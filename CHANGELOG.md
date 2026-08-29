@@ -10,6 +10,7 @@ Cite: **Spikenaut Scientist** · exp-008..014
 
 ### Fixed
 
+- `scripts/spikenaut_train.jl`: `filter_split` errors on a missing or malformed v3 `episode_id` instead of silently dropping the row. Six-digit `gpu-######` contract, embargo 139/169 drop, contiguous-episode guard, and no-shuffle file order are unchanged.
 - `scripts/spikenaut_train.jl` holdout integrity (Scientist exp-014): `health_eval` deep-copies the bank so `snn_model.json` `membrane_potential` stays post-train; CLI `val`/`test` error instead of `tick!(learn=true)` on the holdout; `is_state_telemetry` detects live **key** presence so a JSON `null` on `mem_util_pct` still encodes as 0.
 - `scripts/spikenaut_train.jl`: health eval no longer runs on the CLI/train filter. After training on `gpu-000000..138`, `health_eval` is k=none on test `gpu-000170..198` and prints mean pairwise cofire (exp-009 bar 0.891 / all-16 0.311). A JSONL with no test episodes errors instead of silently evaluating train (Scientist exp-013).
 - `scripts/spikenaut_train.jl`: signed E/I (Dale 80:20), K-WTA, STDP depression, signed reward, 16×3 readout, and signed two's-complement Q8.8 (emits `FFF9`). Does not invert `bank.decay` (keep factor).

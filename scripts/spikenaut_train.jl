@@ -385,9 +385,14 @@ end
 """
     filter_split(samples, split) -> Vector
 
-Keep rows whose `episode_id` belongs to `split`. Embargo 139 and 169 drop.
-Order is the file order — never shuffled. Rows without a parseable
-`episode_id` are dropped (not assigned by position).
+Keep rows whose `episode_id` belongs to `split`. Embargo 139 and 169 drop
+(valid `gpu-######`, not in train/val/test). Order is the file order —
+never shuffled.
+
+A v3 `state_telemetry` row with a missing or malformed `episode_id`
+**errors** instead of being silently dropped. The contract is six-digit
+`gpu-######` (`^gpu-(\\d{6})\$`). Legacy spike rows without an id are
+still skipped (they are not v3).
 
 Errors if an `episode_id` reappears after another episode intervened. The
 training loop and [`health_eval`](@ref) reset temporal state on
@@ -400,6 +405,14 @@ function filter_split(samples, split::Symbol)
     prev = nothing
     for sample in samples
         e = episode_index_of(sample)
+        if e === nothing && is_state_telemetry(sample)
+            raw = rec_get(sample, :episode_id)
+            error(
+                "v3 state_telemetry row has missing or malformed episode_id " *
+                "(got $(repr(raw)); expected gpu-######). " *
+                "Refusing to silently drop the row."
+            )
+        end
         keep = episode_split(e) === split
         # `prev` advances on EVERY row, including rows of other splits. A
         # skipped row still breaks adjacency, so train ep0 / test ep170 /

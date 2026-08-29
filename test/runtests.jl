@@ -399,8 +399,23 @@ end
             embargoed = [episode_index_of(r) for r in rows if episode_split(episode_index_of(r)) === nothing]
             @test embargoed == [139, 169]
             @test [episode_index_of(r) for r in tr] == [0, 0]
-            # Missing episode_id is dropped, not invented.
-            @test filter_split([Dict(:mem_util_pct => 1)], :train) == []
+            # Embargo is a valid gpu-###### — drop, do not error.
+            @test filter_split([Dict(:episode_id => "gpu-000139", :mem_util_pct => 1)], :train) == []
+            @test filter_split([Dict(:episode_id => "gpu-000169", :mem_util_pct => 1)], :val) == []
+            # Missing / malformed v3 episode_id must error, not silently drop.
+            @test_throws ErrorException filter_split([Dict(:mem_util_pct => 1)], :train)
+            @test_throws ErrorException filter_split([
+                Dict(:episode_id => "gpu-000000", :mem_util_pct => 1),
+                Dict(:mem_util_pct => 2),
+            ], :train)
+            for bad_id in ("gpu-150", "gpu-0000150", "other-gpu-000150", "gpu-00015", nothing)
+                @test_throws ErrorException filter_split(
+                    [Dict(:episode_id => bad_id, :mem_util_pct => 1)], :train)
+            end
+            null_ep = JSON3.read("{\"episode_id\":null,\"mem_util_pct\":1}")
+            @test_throws ErrorException filter_split([null_ep], :train)
+            # Legacy spikes without episode_id are not v3 — still skipped.
+            @test filter_split([Dict(:spikes => [0.1, 0.2])], :train) == []
 
             # A row from another split still breaks adjacency: train ep0 /
             # test ep170 / train ep0 would put the two ep0 fragments next to
@@ -414,6 +429,8 @@ end
             @test_throws ErrorException filter_split(interleaved, :train)
             # Six digits or nothing: `gpu-150` is unparseable, not episode 150.
             @test episode_index("gpu-150") === nothing
+            @test episode_index("gpu-0000150") === nothing
+            @test episode_index("other-gpu-000150") === nothing
 
             # Health must use test, never the already-filtered train split.
             health_rows = require_test_split(rows)

@@ -137,7 +137,7 @@ Axons 5..15 are unused width, held at 0 — not fake channels and not first-diff
 - embargo 169
 - test `gpu-000170..198`
 
-Ingest is JSONL. Published v3 shards are parquet; this sidecar does not convert them or fabricate timestamps. Pass JSONL records that already carry the five live fields plus `episode_id`.
+Ingest is JSONL. Published v3 shards are parquet; this sidecar does not convert them or fabricate timestamps. Pass JSONL records that already carry the five live fields plus a six-digit `episode_id` (`gpu-######`). A missing or malformed v3 `episode_id` errors instead of silently dropping the row.
 
 The sidecar has its own environment (`scripts/Project.toml`) because JSON3 is
 not a dependency of the package itself — run it with `--project=scripts`, not
