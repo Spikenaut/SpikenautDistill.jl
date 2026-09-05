@@ -111,6 +111,8 @@ Any function that takes that output and returns a scalar loss is a valid loss fu
 
 Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` has no E/I sign. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes) and does not mutate the bank that `export_artifacts` serializes. CLI split must be **train** (default); `val` / `test` error instead of `tick!(learn=true)` on the holdout. A JSONL with no test episodes errors instead of silently evaluating train. JSON `null` on a live key still counts; the value encodes as 0 (T=0 stays 0).
 
+**Anti-clone knobs** (Scientist exp-023; seed 123 / 5 ep PASS: cofire 0.733, I live, 10/12 unique active Q8.8): live-row cosine repulsion (`DIV_LR=0.00035`, `DIV_COS_MIN=0.55`), I-drive (`I_DRIVE=0.05`, `I_THRESH=0.90`), train K-WTA quota (`I_WTA_MAX=2`, `E_WTA_MIN=2`), milder LTD (`STDP_LTD=0.0008`), homeostatic thresh (`RATE_TARGET=0.12`). Optional CLI seed (default 123). Encoder / holdout / health_eval contract unchanged.
+
 It trains on the **legal v3 `state_telemetry` encoder**, not `qubic_ticks_snn` `*_derived` columns (those are a closed form of `tick_rate`; Spikenaut Scientist exp-008, 0 mismatches / 27430). Pointing the sidecar at derived-only JSONL errors instead of silently training on forbidden sensors.
 
 **Live columns** (axons 0..4; survive train AND val AND test; exp-008):
@@ -148,12 +150,12 @@ julia --project=scripts -e 'using Pkg; Pkg.instantiate()'   # once
 
 julia --project=scripts scripts/spikenaut_train.jl \
   /path/to/state_telemetry.jsonl \
-  20 /tmp/spikenaut-out train
+  5 /tmp/spikenaut-out train 123
 ```
 
 Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Do not export weights to Hugging Face and do not write `rmems/Spikenaut-SNN` `dataset/merged_v2/` from this path.
 
-Cite: **Spikenaut Scientist** · exp-008..014.
+Cite: **Spikenaut Scientist** · exp-008..023.
 
 ## Integration
 

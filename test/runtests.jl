@@ -257,6 +257,11 @@ end
         # as forbidden-sensor refusals (exp-008).
         @test occursin("FORBIDDEN_SENSORS", script_src)
         @test occursin("Refusing *_derived", script_src)
+        @test occursin("DIV_LR", script_src)
+        @test occursin("I_DRIVE", script_src)
+        @test occursin("RATE_TARGET", script_src)
+        @test occursin("0.00035", script_src)
+        @test occursin("I_WTA_MAX", script_src)
 
         # Include the standalone sidecar without running main().
         include(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"))
@@ -462,11 +467,34 @@ end
             # what lets inhibitory neurons be driven to threshold at all.
             @test all(>=(0), bank.readout[:, 1:N_EXC])
             @test all(<=(0), bank.readout[:, INHIB_ROWS])
+            @test DIV_LR == 0.00035f0
+            @test DIV_COS_MIN == 0.55f0
+            @test I_DRIVE == 0.05f0
+            @test I_THRESH == 0.90f0
+            @test I_WTA_MAX == 2
+            @test E_WTA_MIN == 2
+            @test STDP_LTD == 0.0008f0
+            @test RATE_TARGET == 0.12f0
+            @test all(t -> t == I_THRESH, bank.thresh[INHIB_ROWS])
 
             stim = fill(0.95f0, N_CHANNELS)
             nspk = tick!(bank, stim, 0.4f0, Float32[0.8, 0.6, 0.7])
             @test nspk <= K_WTA
             @test count(bank.spikes) <= K_WTA
+
+            # Mixed K-WTA quota: 4 I + 4 E crossing → ≤2 I winners.
+            spikes = falses(N_NEURONS)
+            spikes[1:4] .= true
+            spikes[13:16] .= true
+            v = Float32.(16:-1:1)
+            apply_kwta!(spikes, v, K_WTA)
+            @test count(spikes) <= K_WTA
+            @test count(spikes[INHIB_ROWS]) <= I_WTA_MAX
+            @test count(spikes[1:N_EXC]) >= 1
+
+            W = ones(Float32, N_NEURONS, N_CHANNELS)
+            diversify_rows!(W, 0.5f0, 0.1f0)
+            @test std(W[:, 1:N_LIVE_AXONS]) > 0
 
             # Drive LTD + signed reward; Dale must hold on the readout throughout.
             inhib_spikes = 0
