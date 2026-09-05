@@ -1,0 +1,7 @@
+{"episode_id":"gpu-000000","step_idx":0,"mem_util_pct":37.5,"power_w":8.527000427246094,"gpu_temp_c":34.5,"sm_clock_mhz":1545,"mem_clock_mhz":405,"fan_speed_pct":100,"vddcr_gfx_v":0.8,"vram_temp_c":42.5,"hashrate_mh_derived":9.99,"power_w_derived":400,"gpu_temp_c_derived":75,"reward_hint_derived":1.0,"tick_rate":0.5}
+{"episode_id":"gpu-000000","step_idx":1,"mem_util_pct":0,"power_w":8.527000427246094,"gpu_temp_c":0,"sm_clock_mhz":180,"mem_clock_mhz":405}
+{"episode_id":"gpu-000139","step_idx":0,"mem_util_pct":10,"power_w":50,"gpu_temp_c":20,"sm_clock_mhz":500,"mem_clock_mhz":1000}
+{"episode_id":"gpu-000150","step_idx":0,"mem_util_pct":20,"power_w":100,"gpu_temp_c":40,"sm_clock_mhz":1000,"mem_clock_mhz":2000}
+{"episode_id":"gpu-000169","step_idx":0,"mem_util_pct":30,"power_w":150,"gpu_temp_c":50,"sm_clock_mhz":1500,"mem_clock_mhz":4000}
+{"episode_id":"gpu-000180","step_idx":0,"mem_util_pct":75,"power_w":302.8450012207031,"gpu_temp_c":69,"sm_clock_mhz":2910,"mem_clock_mhz":14801}
+{"episode_id":"gpu-000196","step_idx":0,"mem_util_pct":0,"power_w":8.527000427246094,"gpu_temp_c":0,"sm_clock_mhz":210,"mem_clock_mhz":405}
