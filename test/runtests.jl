@@ -257,6 +257,11 @@ end
         # as forbidden-sensor refusals (exp-008).
         @test occursin("FORBIDDEN_SENSORS", script_src)
         @test occursin("Refusing *_derived", script_src)
+        @test occursin("DIV_LR", script_src)
+        @test occursin("I_DRIVE", script_src)
+        @test occursin("RATE_TARGET", script_src)
+        @test occursin("0.00035", script_src)
+        @test occursin("I_WTA_MAX", script_src)
 
         # Include the standalone sidecar without running main().
         include(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"))
@@ -462,11 +467,42 @@ end
             # what lets inhibitory neurons be driven to threshold at all.
             @test all(>=(0), bank.readout[:, 1:N_EXC])
             @test all(<=(0), bank.readout[:, INHIB_ROWS])
+            @test DIV_LR == 0.00035f0
+            @test DIV_COS_MIN == 0.55f0
+            @test I_DRIVE == 0.05f0
+            @test I_THRESH == 0.90f0
+            @test I_WTA_MAX == 2
+            @test E_WTA_MIN == 2
+            @test STDP_LTD == 0.0008f0
+            @test RATE_TARGET == 0.12f0
+            @test all(t -> t == I_THRESH, bank.thresh[INHIB_ROWS])
 
             stim = fill(0.95f0, N_CHANNELS)
             nspk = tick!(bank, stim, 0.4f0, Float32[0.8, 0.6, 0.7])
             @test nspk <= K_WTA
             @test count(bank.spikes) <= K_WTA
+
+            # Mixed K-WTA quota: 4 I + 4 E crossing → ≤2 I winners.
+            spikes = falses(N_NEURONS)
+            spikes[1:4] .= true
+            spikes[13:16] .= true
+            v = Float32.(16:-1:1)
+            apply_kwta!(spikes, v, K_WTA)
+            @test count(spikes) <= K_WTA
+            @test count(spikes[INHIB_ROWS]) <= I_WTA_MAX
+            @test count(spikes[1:N_EXC]) >= E_WTA_MIN
+
+            W = zeros(Float32, N_NEURONS, N_CHANNELS)
+            W[1:2, 1:N_LIVE_AXONS] .= 1f0
+            W[:, (N_LIVE_AXONS + 1):end] .= 0.25f0
+            unused_before = copy(W[:, (N_LIVE_AXONS + 1):end])
+            clone_cos_before = dot(W[1, 1:N_LIVE_AXONS], W[2, 1:N_LIVE_AXONS]) /
+                               (norm(W[1, 1:N_LIVE_AXONS]) * norm(W[2, 1:N_LIVE_AXONS]))
+            diversify_rows!(W, DIV_LR, DIV_COS_MIN)
+            clone_cos_after = dot(W[1, 1:N_LIVE_AXONS], W[2, 1:N_LIVE_AXONS]) /
+                              (norm(W[1, 1:N_LIVE_AXONS]) * norm(W[2, 1:N_LIVE_AXONS]))
+            @test clone_cos_after < clone_cos_before
+            @test W[:, (N_LIVE_AXONS + 1):end] == unused_before
 
             # Drive LTD + signed reward; Dale must hold on the readout throughout.
             inhib_spikes = 0
@@ -486,7 +522,8 @@ end
             @test std(bank.weights) > 0.01f0
 
             mktempdir() do dir
-                paths = export_artifacts(bank, dir)
+                export_seed = 456
+                paths = export_artifacts(bank, dir, true, export_seed)
                 @test isfile(joinpath(dir, "parameters_output_weights.mem"))
                 @test countlines(joinpath(dir, "parameters_output_weights.mem")) == 48
                 @test countlines(joinpath(dir, "parameters_weights.mem")) == 256
@@ -515,14 +552,30 @@ end
                 @test olines[end] == q88_signed(bank.readout[N_OUTPUTS, N_NEURONS])
                 # Signed encoder must be able to emit FFF9 (regression vs unsigned clamp).
                 @test q88_signed(-7 / 256) == "FFF9"
-                model = read(joinpath(dir, "snn_model.json"), String)
-                @test occursin("keep", model)
-                @test occursin("80:20", model)
-                @test occursin("outgoing", model)
-                @test occursin("v3_state_telemetry", model)
-                @test occursin("mem_util_pct", model)
-                @test occursin("74acdd0f", model)
-                @test occursin("5:15", model)
+                model_json = read(joinpath(dir, "snn_model.json"), String)
+                @test occursin("keep", model_json)
+                @test occursin("80:20", model_json)
+                @test occursin("outgoing", model_json)
+                @test occursin("v3_state_telemetry", model_json)
+                @test occursin("mem_util_pct", model_json)
+                @test occursin("74acdd0f", model_json)
+                @test occursin("5:15", model_json)
+                model = JSON3.read(model_json)
+                knobs = model.exp023_knobs
+                @test Float32(knobs.DIV_LR) == DIV_LR
+                @test Float32(knobs.DIV_COS_MIN) == DIV_COS_MIN
+                @test Float32(knobs.I_DRIVE) == I_DRIVE
+                @test Float32(knobs.I_LTD_SCALE) == I_LTD_SCALE
+                @test Float32(knobs.I_THRESH) == I_THRESH
+                @test Float32(knobs.PREF_GAIN) == PREF_GAIN
+                @test knobs.I_WTA_MAX == I_WTA_MAX
+                @test knobs.E_WTA_MIN == E_WTA_MIN
+                @test Float32(knobs.RATE_TARGET) == RATE_TARGET
+                @test Float32(knobs.THRESH_LR) == THRESH_LR
+                @test Float32(knobs.THRESH_MIN) == THRESH_MIN
+                @test Float32(knobs.THRESH_MAX) == THRESH_MAX
+                @test Float32(knobs.STDP_LTD) == STDP_LTD
+                @test model.seed == export_seed
                 @test length(paths) == 5
             end
 

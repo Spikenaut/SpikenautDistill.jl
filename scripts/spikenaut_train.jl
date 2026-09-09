@@ -25,12 +25,17 @@
 # Episode holdout (never shuffle rows across episodes; embargo 139, 169):
 #   train gpu-000000..138   val gpu-000140..168   test gpu-000170..198
 #
+# Anti-clone / I-drive knobs (Scientist exp-023): channel-specialized init,
+# live-row cosine repulsion, I bias + mixed E/I K-WTA quota, milder LTD,
+# homeostatic thresholds. LIVE_COLUMNS / FROZEN_MINMAX / episode holdout /
+# health_eval k=none contract are unchanged.
+#
 # Usage:
-#   julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir] [split]
+#   julia scripts/spikenaut_train.jl <data_path> [epochs] [out_dir] [split] [seed]
 #   split must be train (default). val/test error — no learn=true on holdout.
 #   julia scripts/spikenaut_train.jl \
 #     /path/to/state_telemetry.jsonl \
-#     20 /tmp/spikenaut-out train
+#     5 /tmp/spikenaut-out train 123
 #
 # Ingest is JSONL (JSON3 + stdlib). Published v3 shards are parquet; this
 # sidecar does not convert or invent timestamps. Point it at JSONL records
@@ -54,7 +59,7 @@ const INHIB_ROWS   = (N_EXC + 1):N_NEURONS        # 13:16
 const K_WTA        = 4
 const DECAY        = 0.85f0                       # keep factor, not leak
 const STDP_LTP     = 0.01f0
-const STDP_LTD     = 0.005f0
+const STDP_LTD     = 0.0008f0   # exp-023: stock 0.005 pinned losers to W_MIN
 const EPROP_LR     = 0.002f0
 const READOUT_LR   = 0.01f0
 const W_MIN        = -1.0f0
@@ -64,6 +69,21 @@ const THRESH_INIT  = 1.0f0
 const TRACE_LAMBDA = 0.85f0
 const MIN_TRAIN_N  = 100
 const DEFAULT_V3_JSONL = "/home/raulmc/Spikenaut-Vault/Spikenaut-SNN-Telemetry/v3/state_telemetry.jsonl"
+
+# exp-023 knobs (seed 123 / 5 ep PASS: cofire 0.733, I live, 10/12 unique active).
+# Health eval stays k=none on test gpu-000170..198.
+const DIV_LR        = 0.00035f0
+const DIV_COS_MIN   = 0.55f0
+const I_DRIVE       = 0.05f0
+const I_LTD_SCALE   = 0.50f0
+const I_THRESH      = 0.90f0
+const PREF_GAIN     = 0.55f0
+const I_WTA_MAX     = 2
+const E_WTA_MIN     = 2
+const RATE_TARGET   = 0.12f0
+const THRESH_LR     = 0.0015f0
+const THRESH_MIN    = 0.45f0
+const THRESH_MAX    = 1.60f0
 
 # Legal v3 live columns → axons 0..4. Order is the encoder contract.
 const LIVE_COLUMNS = (
@@ -114,13 +134,22 @@ end
 """
     init_hidden_weights() -> Matrix{Float32}
 
-Incoming weights, `N_NEURONS × N_CHANNELS`. Every neuron — excitatory and
-inhibitory alike — gets the same mildly-positive random drive, so all 16 can
-reach threshold. The E/I distinction lives on the outgoing side; see
-[`apply_dale_out!`](@ref).
+Incoming weights, `N_NEURONS × N_CHANNELS`. Live axons get a preferred-channel
+±`PREF_GAIN` so STDP does not start from one basin (exp-023). Unused axons
+6:16 stay near-zero noise. The E/I distinction lives on the outgoing side;
+see [`apply_dale_out!`](@ref).
 """
 function init_hidden_weights()
-    return randn(Float32, N_NEURONS, N_CHANNELS) .* 0.08f0 .+ 0.04f0
+    W = randn(Float32, N_NEURONS, N_CHANNELS) .* 0.03f0
+    @inbounds for i in 1:N_NEURONS
+        pref = ((i - 1) % N_LIVE_AXONS) + 1
+        on_detector = i <= 8 || i == 13 || i == 14
+        pol = on_detector ? 1f0 : -1f0
+        for ch in 1:N_LIVE_AXONS
+            W[i, ch] += (ch == pref) ? (PREF_GAIN * pol) : (-0.08f0 * pol)
+        end
+    end
+    return W
 end
 
 """
@@ -144,9 +173,11 @@ function init_readout()
 end
 
 function LIFBank()
+    thresh = fill(THRESH_INIT, N_NEURONS)
+    thresh[INHIB_ROWS] .= I_THRESH
     LIFBank(
         zeros(Float32, N_NEURONS),
-        fill(THRESH_INIT, N_NEURONS),
+        thresh,
         init_hidden_weights(),
         fill(DECAY, N_NEURONS),
         falses(N_NEURONS),
@@ -472,13 +503,29 @@ Keep the `k` highest-`v` firers; silence the rest. Membrane of losers
 is left intact so they can compete on the next tick.
 """
 function apply_kwta!(spikes::AbstractVector{Bool}, v::AbstractVector, k::Int)
-    nfire = count(spikes)
-    nfire <= k && return spikes
-    idx = findall(spikes)
-    order = sortperm(view(v, idx); rev=true)
+    # Train-time mixed quota (exp-023): at most I_WTA_MAX inhibitory winners
+    # and prefer ≥ E_WTA_MIN excitatory when they fire, so I-drive cannot
+    # monopolize K-WTA. Health eval is k=none and never calls this.
+    cand = findall(spikes)
+    isempty(cand) && return spikes
+    e_c = [i for i in cand if i <= N_EXC]
+    i_c = [i for i in cand if i in INHIB_ROWS]
+    sort!(e_c; by = i -> v[i], rev=true)
+    sort!(i_c; by = i -> v[i], rev=true)
+    take_i = min(I_WTA_MAX, length(i_c), k)
+    take_e = min(length(e_c), max(E_WTA_MIN, k - take_i), k)
+    take_e = min(take_e, k - take_i)
+    leftover = k - take_e - take_i
+    extra_e = min(leftover, max(0, length(e_c) - take_e))
+    take_e += extra_e
+    leftover -= extra_e
+    take_i += min(leftover, max(0, min(I_WTA_MAX, length(i_c)) - take_i))
     fill!(spikes, false)
-    @inbounds for t in 1:k
-        spikes[idx[order[t]]] = true
+    @inbounds for t in 1:take_e
+        spikes[e_c[t]] = true
+    end
+    @inbounds for t in 1:take_i
+        spikes[i_c[t]] = true
     end
     return spikes
 end
@@ -520,6 +567,53 @@ function scale_rows_l2!(W::AbstractMatrix, cap::Float32)
     return W
 end
 
+"""
+    diversify_rows!(W, lr, cos_min)
+
+Anti-clone (exp-023): for each pair of hidden rows whose cosine on the live
+axons exceeds `cos_min`, subtract a scaled copy of the other row. Unused
+axons 6:16 are left alone. Applied after STDP/e-prop, before L2 cap.
+"""
+function diversify_rows!(W::AbstractMatrix, lr::Float32, cos_min::Float32)
+    live = 1:N_LIVE_AXONS
+    delta = zeros(Float32, N_NEURONS, N_LIVE_AXONS)
+    @inbounds for i in 1:N_NEURONS
+        wi = view(W, i, live)
+        ni = norm(wi)
+        ni < 1f-6 && continue
+        for j in (i + 1):N_NEURONS
+            wj = view(W, j, live)
+            nj = norm(wj)
+            nj < 1f-6 && continue
+            c = dot(wi, wj) / (ni * nj)
+            if c > cos_min
+                s = lr * (c - cos_min)
+                delta[i, :] .-= s .* (wj ./ nj)
+                delta[j, :] .-= s .* (wi ./ ni)
+                # Equal (or numerically near-collinear) rows receive the same
+                # symmetric update above and would remain clones forever. Split
+                # them along a deterministic direction orthogonal to `wi`.
+                if c >= 1f0 - 1f-6
+                    ui = wi ./ ni
+                    axis = argmin(abs.(ui))
+                    orth = -ui[axis] .* ui
+                    orth[axis] += 1f0
+                    orth ./= norm(orth)
+                    # An orthogonal change affects cosine only at second order;
+                    # keep it large enough to survive Float32 rounding.
+                    split = max(s, 2f0 * sqrt(eps(Float32)) * min(ni, nj))
+                    delta[i, :] .+= split .* orth
+                    delta[j, :] .-= split .* orth
+                end
+            end
+        end
+    end
+    @inbounds for i in 1:N_NEURONS
+        view(W, i, live) .+= view(delta, i, :)
+    end
+    return W
+end
+
 # ── One training tick ─────────────────────────────────────────────────
 """
     tick!(bank, stim, reward, target=nothing; k=K_WTA)
@@ -539,6 +633,13 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
 
     # 3. LIF forward: decay is a **keep** factor (Rust leak = 1 - keep).
     input = bank.weights * stim
+    # I-drive: constant current so Dale I units can reach threshold.
+    # Applied on train and eval (model bias, not a learn-only hack).
+    if I_DRIVE != 0f0
+        @inbounds for i in INHIB_ROWS
+            input[i] += I_DRIVE
+        end
+    end
     bank.v .= bank.decay .* bank.v .+ input
 
     # 4. Fire, then optional K-WTA, then reset winners only
@@ -554,7 +655,8 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
             if bank.spikes[i]
                 bank.weights[i, :] .+= STDP_LTP .* pre_snap
             else
-                bank.weights[i, :] .-= STDP_LTD .* pre
+                ltd = (i in INHIB_ROWS) ? (STDP_LTD * I_LTD_SCALE) : STDP_LTD
+                bank.weights[i, :] .-= ltd .* pre
             end
         end
 
@@ -578,12 +680,18 @@ function tick!(bank::LIFBank, stim::Vector{Float32}, reward::Float32,
             apply_dale_out!(bank.readout)
         end
 
-        # 8. Signed L2 cap on incoming weights (do **not** divide rows by sum — that
-        #    destroyed sign and collapsed every row onto the same simplex). Incoming
-        #    weights carry no E/I sign constraint: Dale lives on the outgoing side,
-        #    in step 7, so every neuron can be driven to threshold.
+        # 8. Anti-clone cosine repulsion on live-axon rows, then signed L2 cap.
+        #    Incoming weights carry no E/I sign constraint: Dale lives on the
+        #    outgoing side, in step 7, so every neuron can be driven to threshold.
+        diversify_rows!(bank.weights, DIV_LR, DIV_COS_MIN)
         scale_rows_l2!(bank.weights, ROW_L2_CAP)
         clamp!(bank.weights, W_MIN, W_MAX)
+        # Intrinsic homeostasis: silent cells drop threshold, lockstep
+        # winners raise it. Keeps I (and E) in the learning set.
+        @inbounds for i in 1:N_NEURONS
+            bank.thresh[i] += THRESH_LR * ((bank.spikes[i] ? 1f0 : 0f0) - RATE_TARGET)
+            bank.thresh[i] = clamp(bank.thresh[i], THRESH_MIN, THRESH_MAX)
+        end
     end
 
     sum(bank.spikes)
@@ -719,7 +827,8 @@ function write_mem(path, values)
     end
 end
 
-function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=true)
+function export_artifacts(bank::LIFBank, out_dir::AbstractString,
+                          used_v3::Bool=true, seed::Int=123)
     mkpath(out_dir)
     neurons_json = [
         Dict(
@@ -744,6 +853,7 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=
         "q88"            => "signed",
         "decay_semantics"=> "keep",
         "n_outputs"      => N_OUTPUTS,
+        "seed"           => seed,
         # A legacy `spikes` / `inputs` run never touched the v3 encoder; do
         # not stamp it (or its frozen scale / holdout) onto the artifact.
         "encoder"        => used_v3 ? "v3_state_telemetry" : "legacy_spikes",
@@ -756,6 +866,21 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=
         model["unused_axons"]  = "5:15"
         model["frozen_minmax"]  = Dict(string(k) => [lo, hi] for (k, (lo, hi)) in pairs(FROZEN_MINMAX))
         model["frozen_lineage"] = FROZEN_LINEAGE
+        model["exp023_knobs"]   = Dict(
+            "DIV_LR" => DIV_LR,
+            "DIV_COS_MIN" => DIV_COS_MIN,
+            "I_DRIVE" => I_DRIVE,
+            "I_LTD_SCALE" => I_LTD_SCALE,
+            "I_THRESH" => I_THRESH,
+            "PREF_GAIN" => PREF_GAIN,
+            "I_WTA_MAX" => I_WTA_MAX,
+            "E_WTA_MIN" => E_WTA_MIN,
+            "RATE_TARGET" => RATE_TARGET,
+            "THRESH_LR" => THRESH_LR,
+            "THRESH_MIN" => THRESH_MIN,
+            "THRESH_MAX" => THRESH_MAX,
+            "STDP_LTD" => STDP_LTD,
+        )
         model["episode_split"]  = Dict(
             "train"   => "gpu-000000..138",
             "val"     => "gpu-000140..168",
@@ -889,12 +1014,15 @@ function main(args=ARGS)
         "  health:    k=none on test gpu-000170..198 (cofire, all-16, I spikes).\n" *
         "             Errors if the JSONL has no test episodes.\n" *
         "  split:     train only (default). val/test error — no learn=true on holdout.\n" *
-        "  example:   julia scripts/spikenaut_train.jl $DEFAULT_V3_JSONL 20 /tmp/spikenaut-out train"
+        "  seed:      optional RNG seed (default 123; exp-023 PASS).\n" *
+        "  example:   julia scripts/spikenaut_train.jl $DEFAULT_V3_JSONL 5 /tmp/spikenaut-out train 123"
     )
     data_path = args[1]
     epochs    = length(args) >= 2 ? parse(Int, args[2]) : 20
     out_dir   = length(args) >= 3 ? args[3] : "out_train"
     split     = require_train_cli_split(length(args) >= 4 ? parse_split(args[4]) : :train)
+    seed      = length(args) >= 5 ? parse(Int, args[5]) : 123
+    Random.seed!(seed)
 
     isdir(data_path) || isfile(data_path) || error("Data path not found: $data_path")
     mkpath(out_dir)
@@ -907,8 +1035,10 @@ function main(args=ARGS)
     println("Live   : mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz")
     println("Scale  : frozen train minmax lineage=$FROZEN_LINEAGE; axons 5..15 unused=0")
     println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory (outgoing readout); incoming W unsigned")
-    println("K-WTA  : train k=$K_WTA; health eval k=none on test gpu-000170..198")
+    println("K-WTA  : train k=$K_WTA (I_WTA_MAX=$I_WTA_MAX E_WTA_MIN=$E_WTA_MIN); health eval k=none on test gpu-000170..198")
     println("Decay  : keep=$DECAY  (Rust leak = $(1 - DECAY))")
+    println("Seed   : $seed")
+    println("Knobs  : DIV_LR=$DIV_LR DIV_COS_MIN=$DIV_COS_MIN I_DRIVE=$I_DRIVE I_THRESH=$I_THRESH RATE_TARGET=$RATE_TARGET STDP_LTD=$STDP_LTD")
 
     print("Loading samples... ")
     loaded = load_data(data_path)
@@ -992,7 +1122,7 @@ function main(args=ARGS)
                 h.n, h.spk_per_tick, h.all16_frac, h.cofire, h.patterns, h.inhib_spikes)
     end
 
-    paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded))
+    paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded), seed)
     println("\nExported:")
     for p in paths
         println("  $p")
