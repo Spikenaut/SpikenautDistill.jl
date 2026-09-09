@@ -590,6 +590,21 @@ function diversify_rows!(W::AbstractMatrix, lr::Float32, cos_min::Float32)
                 s = lr * (c - cos_min)
                 delta[i, :] .-= s .* (wj ./ nj)
                 delta[j, :] .-= s .* (wi ./ ni)
+                # Equal (or numerically near-collinear) rows receive the same
+                # symmetric update above and would remain clones forever. Split
+                # them along a deterministic direction orthogonal to `wi`.
+                if c >= 1f0 - 1f-6
+                    ui = wi ./ ni
+                    axis = argmin(abs.(ui))
+                    orth = -ui[axis] .* ui
+                    orth[axis] += 1f0
+                    orth ./= norm(orth)
+                    # An orthogonal change affects cosine only at second order;
+                    # keep it large enough to survive Float32 rounding.
+                    split = max(s, 2f0 * sqrt(eps(Float32)) * min(ni, nj))
+                    delta[i, :] .+= split .* orth
+                    delta[j, :] .-= split .* orth
+                end
             end
         end
     end
@@ -812,7 +827,8 @@ function write_mem(path, values)
     end
 end
 
-function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=true)
+function export_artifacts(bank::LIFBank, out_dir::AbstractString,
+                          used_v3::Bool=true, seed::Int=123)
     mkpath(out_dir)
     neurons_json = [
         Dict(
@@ -837,6 +853,7 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=
         "q88"            => "signed",
         "decay_semantics"=> "keep",
         "n_outputs"      => N_OUTPUTS,
+        "seed"           => seed,
         # A legacy `spikes` / `inputs` run never touched the v3 encoder; do
         # not stamp it (or its frozen scale / holdout) onto the artifact.
         "encoder"        => used_v3 ? "v3_state_telemetry" : "legacy_spikes",
@@ -860,6 +877,8 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString, used_v3::Bool=
             "E_WTA_MIN" => E_WTA_MIN,
             "RATE_TARGET" => RATE_TARGET,
             "THRESH_LR" => THRESH_LR,
+            "THRESH_MIN" => THRESH_MIN,
+            "THRESH_MAX" => THRESH_MAX,
             "STDP_LTD" => STDP_LTD,
         )
         model["episode_split"]  = Dict(
@@ -1103,7 +1122,7 @@ function main(args=ARGS)
                 h.n, h.spk_per_tick, h.all16_frac, h.cofire, h.patterns, h.inhib_spikes)
     end
 
-    paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded))
+    paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded), seed)
     println("\nExported:")
     for p in paths
         println("  $p")

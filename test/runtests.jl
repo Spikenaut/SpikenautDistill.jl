@@ -490,11 +490,19 @@ end
             apply_kwta!(spikes, v, K_WTA)
             @test count(spikes) <= K_WTA
             @test count(spikes[INHIB_ROWS]) <= I_WTA_MAX
-            @test count(spikes[1:N_EXC]) >= 1
+            @test count(spikes[1:N_EXC]) >= E_WTA_MIN
 
-            W = ones(Float32, N_NEURONS, N_CHANNELS)
-            diversify_rows!(W, 0.5f0, 0.1f0)
-            @test std(W[:, 1:N_LIVE_AXONS]) > 0
+            W = zeros(Float32, N_NEURONS, N_CHANNELS)
+            W[1:2, 1:N_LIVE_AXONS] .= 1f0
+            W[:, (N_LIVE_AXONS + 1):end] .= 0.25f0
+            unused_before = copy(W[:, (N_LIVE_AXONS + 1):end])
+            clone_cos_before = dot(W[1, 1:N_LIVE_AXONS], W[2, 1:N_LIVE_AXONS]) /
+                               (norm(W[1, 1:N_LIVE_AXONS]) * norm(W[2, 1:N_LIVE_AXONS]))
+            diversify_rows!(W, DIV_LR, DIV_COS_MIN)
+            clone_cos_after = dot(W[1, 1:N_LIVE_AXONS], W[2, 1:N_LIVE_AXONS]) /
+                              (norm(W[1, 1:N_LIVE_AXONS]) * norm(W[2, 1:N_LIVE_AXONS]))
+            @test clone_cos_after < clone_cos_before
+            @test W[:, (N_LIVE_AXONS + 1):end] == unused_before
 
             # Drive LTD + signed reward; Dale must hold on the readout throughout.
             inhib_spikes = 0
@@ -514,7 +522,8 @@ end
             @test std(bank.weights) > 0.01f0
 
             mktempdir() do dir
-                paths = export_artifacts(bank, dir)
+                export_seed = 456
+                paths = export_artifacts(bank, dir, true, export_seed)
                 @test isfile(joinpath(dir, "parameters_output_weights.mem"))
                 @test countlines(joinpath(dir, "parameters_output_weights.mem")) == 48
                 @test countlines(joinpath(dir, "parameters_weights.mem")) == 256
@@ -543,14 +552,30 @@ end
                 @test olines[end] == q88_signed(bank.readout[N_OUTPUTS, N_NEURONS])
                 # Signed encoder must be able to emit FFF9 (regression vs unsigned clamp).
                 @test q88_signed(-7 / 256) == "FFF9"
-                model = read(joinpath(dir, "snn_model.json"), String)
-                @test occursin("keep", model)
-                @test occursin("80:20", model)
-                @test occursin("outgoing", model)
-                @test occursin("v3_state_telemetry", model)
-                @test occursin("mem_util_pct", model)
-                @test occursin("74acdd0f", model)
-                @test occursin("5:15", model)
+                model_json = read(joinpath(dir, "snn_model.json"), String)
+                @test occursin("keep", model_json)
+                @test occursin("80:20", model_json)
+                @test occursin("outgoing", model_json)
+                @test occursin("v3_state_telemetry", model_json)
+                @test occursin("mem_util_pct", model_json)
+                @test occursin("74acdd0f", model_json)
+                @test occursin("5:15", model_json)
+                model = JSON3.read(model_json)
+                knobs = model.exp023_knobs
+                @test Float32(knobs.DIV_LR) == DIV_LR
+                @test Float32(knobs.DIV_COS_MIN) == DIV_COS_MIN
+                @test Float32(knobs.I_DRIVE) == I_DRIVE
+                @test Float32(knobs.I_LTD_SCALE) == I_LTD_SCALE
+                @test Float32(knobs.I_THRESH) == I_THRESH
+                @test Float32(knobs.PREF_GAIN) == PREF_GAIN
+                @test knobs.I_WTA_MAX == I_WTA_MAX
+                @test knobs.E_WTA_MIN == E_WTA_MIN
+                @test Float32(knobs.RATE_TARGET) == RATE_TARGET
+                @test Float32(knobs.THRESH_LR) == THRESH_LR
+                @test Float32(knobs.THRESH_MIN) == THRESH_MIN
+                @test Float32(knobs.THRESH_MAX) == THRESH_MAX
+                @test Float32(knobs.STDP_LTD) == STDP_LTD
+                @test model.seed == export_seed
                 @test length(paths) == 5
             end
 
