@@ -1,11 +1,19 @@
 # SynapticDistill.jl
 
+[![CI](https://github.com/rmems/SynapticDistill.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/rmems/SynapticDistill.jl/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
 
+**Repository:** [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl)
+
 **Modular online training for spiking neural networks in Julia — E-prop, OTTT, and more. Works with pure SNNs or hybrid teacher-student systems.**
 
-`SynapticDistill.jl` is a flexible and performant library for training spiking neural networks (SNNs) using online (event-based) learning rules. It is designed to be framework-agnostic, allowing researchers to bring their own models, model-step callbacks, loss functions, and data sources.
+`SynapticDistill.jl` is a flexible and performant library for training spiking neural networks (SNNs) using online (event-based) learning rules. It is designed to be framework-agnostic, allowing researchers to bring their own models, model-step callbacks, loss functions, and data sources. Canonical home is [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl) after the Limen-Neural → rmems transfer (`Limen-Neural/SynapticDistill.jl` redirects here).
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/rmems/SynapticDistill.jl")
+```
 
 ## Core Philosophy
 
@@ -34,11 +42,13 @@
 
 ### Boundary with plasticity-lab (Linear LIM-25)
 
-- `SynapticDistill.jl` (Julia): differentiable or online distillation and teacher-student knowledge transfer.
-- [`plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (Rust): reward-modulated STDP / Hebbian plasticity rules and online low-level weight delta computation.
+This package lives under **rmems**. The STDP / Hebbian peer has **not** transferred (`rmems/plasticity-lab` does not exist). Keep linking the still-live external peer; do not invent an rmems plasticity-lab URL.
+
+- `SynapticDistill.jl` (Julia, [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl)): differentiable or online distillation and teacher-student knowledge transfer.
+- [`plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (Rust; still `Limen-Neural/plasticity-lab`): reward-modulated STDP / Hebbian plasticity rules and online low-level weight delta computation.
 - `SynapticDistill.jl` must not become the home for STDP logic; `plasticity-lab` must not absorb distillation logic.
 
-See the matching boundary note in the [`plasticity-lab` README](https://github.com/Limen-Neural/plasticity-lab#scope-and-ownership-boundaries) and the Linear issue [LIM-25](https://linear.app/rpd-34/issue/LIM-25/plasticity-lab-clarify-ownership-boundary-with-synapticdistilljl).
+See the matching boundary note in the [`plasticity-lab` README](https://github.com/Limen-Neural/plasticity-lab#scope-and-ownership-boundaries) (intentional external-peer link) and the Linear issue [LIM-25](https://linear.app/rpd-34/issue/LIM-25/plasticity-lab-clarify-ownership-boundary-with-synapticdistilljl).
 
 ## Quick Start (Pure SNN Training)
 
@@ -160,6 +170,10 @@ Cite: **Spikenaut Scientist** · exp-008..023.
 ## Integration
 
 `SynapticDistill.jl` is intentionally framework-agnostic. Application-specific IPC, teacher-model execution, hardware interfaces, and domain-specific model architectures should live in caller code and connect through injected model-step and loss callbacks.
+
+## Wiki
+
+The GitHub wiki is **enabled under rmems** (`has_wiki: true`). Browse [`rmems/SynapticDistill.jl/wiki`](https://github.com/rmems/SynapticDistill.jl/wiki) (HTTP 200). Wiki remote: `https://github.com/rmems/SynapticDistill.jl.wiki.git`. Pages already exist (Home, Overview, Getting Started, and the rest of the transferred map). Live install / blob links on those pages should use `rmems/SynapticDistill.jl`. Generated Devin DeepWiki footers that still cite a pre-transfer `Limen-Neural/SynapticDistill.jl` snapshot are historical provenance only.
 
 ## License
 

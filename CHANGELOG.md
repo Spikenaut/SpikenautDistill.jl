@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Post-transfer hygiene (#27): live docs and package metadata point at [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl). README / AGENTS record that the GitHub wiki is enabled under rmems. The plasticity-lab boundary still links the live external peer [`Limen-Neural/plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (`rmems/plasticity-lab` does not exist).
+
 - `scripts/spikenaut_train.jl`: anti-clone / I-drive knobs from Spikenaut Scientist **exp-023** (seed 123 / 5 ep PASS: cofire 0.733, I live, 10 unique active Q8.8 of 12 active). `DIV_LR=0.00035`, `DIV_COS_MIN=0.55`, `I_DRIVE=0.05`, `I_THRESH=0.90`, `I_WTA_MAX=2`, `E_WTA_MIN=2`, `STDP_LTD=0.0008`, `RATE_TARGET=0.12`. LIVE_COLUMNS / FROZEN_MINMAX / episode holdout / health_eval k=none unchanged. Optional CLI seed (default 123). Does not write `merged_v2` or publish HF.
 
 - `scripts/spikenaut_train.jl`: default encoder is legal v3 `state_telemetry` (five live columns: `mem_util_pct`, `power_w`, `gpu_temp_c`, `sm_clock_mhz`, `mem_clock_mhz`) with frozen train minmax (sha lineage `74acdd0f`) and `episode_id` holdout (`gpu-000000..138` / `140..168` / `170..198`, embargo 139 and 169). Axons 5..15 stay 0 as unused width. `*_derived` / `tick_rate` are refused — they are a closed form of `tick_rate` (Scientist exp-008). Reward and readout use live `power_w` and `gpu_temp_c`. Outgoing Dale and unsigned incoming `W` unchanged. K-WTA stays on in training; health eval is `k=none` on test `gpu-000170..198` (cofire + all-16 + I spikes). JSONL ingest only; parquet is not silently converted and timestamps are not invented.

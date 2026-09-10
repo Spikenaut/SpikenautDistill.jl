@@ -4,6 +4,8 @@ version = "0.2.0"
 description = "Modular online training for spiking neural networks in Julia — E-prop, OTTT, and more. Works with pure SNNs or hybrid SNN+LLM systems."
 license = "MIT OR Apache-2.0"
 authors = ["Raul Montoya Cardenas <montoyaraul34@gmail.com>"]
+# Canonical repository after Limen-Neural → rmems transfer (Pkg has no repository= field).
+# https://github.com/rmems/SynapticDistill.jl
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"

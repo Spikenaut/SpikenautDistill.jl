@@ -30,11 +30,13 @@ julia --project=. -e 'using SynapticDistill; println("OK")'
 
 ## Cross-repo README boundary checks
 
-- The canonical `plasticity-lab` checkout is usually a sibling directory: `../plasticity-lab`.
-- For README-only changes that add the `Boundary with plasticity-lab (Linear LIM-25)` section, verify:
-  1. The same three substantive bullets appear in `plasticity-lab/README.md` under `### Boundary with SynapticDistill.jl (Linear LIM-25)`.
+- This Distill repo is [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl). Do not treat it as still under Limen-Neural.
+- The STDP peer has **not** transferred: there is no `rmems/plasticity-lab`. The still-live checkout is [`Limen-Neural/plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (usually a sibling directory `../plasticity-lab` when present).
+- For README changes that touch the `Boundary with plasticity-lab (Linear LIM-25)` section, verify:
+  1. Distill ownership reads as `rmems/SynapticDistill.jl` (not `Limen-Neural/SynapticDistill.jl`).
   2. The mutual-denial line matches exactly: `SynapticDistill.jl` must not become the home for STDP logic; `plasticity-lab` must not absorb distillation logic.
-  3. External links (`https://github.com/Limen-Neural/plasticity-lab#scope-and-ownership-boundaries` and `https://linear.app/rpd-34/issue/LIM-25/...`) return HTTP 200.
+  3. The plasticity-lab link stays the live external peer `https://github.com/Limen-Neural/plasticity-lab#scope-and-ownership-boundaries` (HTTP 200). Do not invent `rmems/plasticity-lab`.
+  4. Linear [LIM-25](https://linear.app/rpd-34/issue/LIM-25/plasticity-lab-clarify-ownership-boundary-with-synapticdistilljl) still returns HTTP 200.
 
 ## Common gotchas
 
