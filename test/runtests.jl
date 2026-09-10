@@ -268,6 +268,21 @@ end
         @test occursin("74acdd0f", script_src)
         @test occursin("gpu-000000..138", script_src)
         @test occursin("parameters_output_weights.mem", script_src)
+        @test occursin("snn_model.json", script_src)
+        @test occursin("parameters_weights.mem", script_src)
+        @test occursin("parameters_decay.mem", script_src)
+        # #13 smoking gun: unsigned Q8.8 clamp must not return.
+        @test !occursin(r"clamp\([^)]*0\s*,\s*65535", script_src)
+        @test !occursin("incoming W unsigned", script_src)
+        @test occursin("q88_signed", script_src)
+        @test occursin("q88_decode", script_src)
+        @test occursin("assert_signed_export", script_src)
+        @test occursin("MERGED_V2_FILES", script_src)
+        readme_src = read(joinpath(@__DIR__, "..", "README.md"), String)
+        @test occursin("merged_v2", readme_src)
+        @test occursin("replacement source", readme_src)
+        @test occursin("parameters_output_weights.mem", readme_src)
+        @test occursin("signed-capable", readme_src)
         # Encoder path must not *read* *_derived. The names may appear only
         # as forbidden-sensor refusals (exp-008).
         @test occursin("FORBIDDEN_SENSORS", script_src)
@@ -282,12 +297,26 @@ end
         include(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"))
 
         @testset "q88_signed two's complement" begin
+            @test W_MIN < 0
+            @test N_INHIB == 4
+            @test N_EXC == 12
             @test q88_signed(0) == "0000"
             @test q88_signed(1) == "0100"
             @test q88_signed(0.75) == "00C0"
             @test q88_signed(-7 / 256) == "FFF9"
             @test q88_signed(-1) == "FF00"
             @test q88_signed(DECAY) == q88_signed(0.85f0)
+            # Independent decode — not "hex equals the same encoder".
+            @test q88_decode("0000") == 0
+            @test q88_decode("0100") == 1
+            @test q88_decode("00C0") == 0.75
+            @test q88_decode("FFF9") == -7 / 256
+            @test q88_decode("FF00") == -1
+            @test q88_decode(q88_signed(-7 / 256)) == -7 / 256
+            @test q88_decode(q88_signed(W_MIN)) == Float64(W_MIN)
+            # Unsigned clamp(round(v*256), 0, 65535) cannot emit FFF9.
+            @test uppercase(string(UInt16(clamp(round(Int, -7 / 256 * 256), 0, 65535)),
+                                   base=16, pad=4)) != "FFF9"
         end
 
         @testset "v3 state_telemetry encoder (exp-008..011)" begin
@@ -592,6 +621,22 @@ end
                 @test Float32(knobs.STDP_LTD) == STDP_LTD
                 @test model.seed == export_seed
                 @test length(paths) == 5
+                @test basename.(collect(paths)) == collect(MERGED_V2_FILES)
+                @test assert_signed_export(dir)
+
+                hidden_q = q88_decode.(wlines)
+                @test minimum(hidden_q) < 0 < maximum(hidden_q)
+                @test any(parse(UInt16, h, base=16) >= 0x8000 for h in wlines)
+                out_q = q88_decode.(olines)
+                for i in 1:N_EXC
+                    @test all(>=(0), out_q[((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS)])
+                end
+                for i in INHIB_ROWS
+                    @test all(<=(0), out_q[((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS)])
+                    @test any(parse(UInt16, olines[(i - 1) * N_OUTPUTS + o], base=16) >= 0x8000 ||
+                              olines[(i - 1) * N_OUTPUTS + o] == "0000"
+                              for o in 1:N_OUTPUTS)
+                end
             end
 
             # Health eval is k=none: a strong drive can fire more than K_WTA.

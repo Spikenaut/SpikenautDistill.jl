@@ -819,6 +819,37 @@ function q88_signed(v)
     uppercase(string(UInt16(mod(q, 65536)), base=16, pad=4))
 end
 
+"""
+    q88_decode(hex) -> Float64
+
+Inverse of [`q88_signed`](@ref). Four hex digits as two's-complement Q8.8.
+Export tests must decode the *file* so an unsigned `clamp(..., 0, 65535)`
+writer cannot pass by matching itself.
+"""
+function q88_decode(hex::AbstractString)
+    token = strip(hex)
+    length(token) == 4 || error("Q8.8 hex must be 4 digits, got $(repr(token))")
+    u = parse(UInt16, token, base=16)
+    q = u >= 0x8000 ? Int(u) - 65536 : Int(u)
+    return q / 256
+end
+
+# FPGA / vault layout expected by Spikenaut-SNN `dataset/merged_v2/`.
+# This sidecar writes these names; it does not overwrite that tree.
+const MERGED_V2_FILES = (
+    "snn_model.json",
+    "parameters.mem",
+    "parameters_weights.mem",
+    "parameters_decay.mem",
+    "parameters_output_weights.mem",
+)
+const MERGED_V2_LINE_COUNTS = (
+    "parameters.mem" => 16,
+    "parameters_weights.mem" => 256,
+    "parameters_decay.mem" => 16,
+    "parameters_output_weights.mem" => 48,
+)
+
 function write_mem(path, values)
     open(path, "w") do f
         for v in values
@@ -904,13 +935,48 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString,
     write_mem(joinpath(out_dir, "parameters_output_weights.mem"),
               (bank.readout[o, i] for i in 1:N_NEURONS for o in 1:N_OUTPUTS))
 
-    return (
-        joinpath(out_dir, "snn_model.json"),
-        joinpath(out_dir, "parameters.mem"),
-        joinpath(out_dir, "parameters_weights.mem"),
-        joinpath(out_dir, "parameters_decay.mem"),
-        joinpath(out_dir, "parameters_output_weights.mem"),
-    )
+    return ntuple(i -> joinpath(out_dir, MERGED_V2_FILES[i]), length(MERGED_V2_FILES))
+end
+
+"""
+    assert_signed_export(out_dir) -> Bool
+
+Spikenaut-SNN#13 sidecar contract on **written files** (not the in-memory
+bank): `merged_v2` filenames + counts, mixed-sign hidden Q8.8, Dale 80:20
+on decoded output weights, JSON `q88=signed`. Call after a train export.
+Does not write `Spikenaut-SNN/dataset/merged_v2/`.
+"""
+function assert_signed_export(out_dir::AbstractString)
+    for name in MERGED_V2_FILES
+        isfile(joinpath(out_dir, name)) || error("merged_v2 export missing $name")
+    end
+    for (name, n) in MERGED_V2_LINE_COUNTS
+        got = countlines(joinpath(out_dir, name))
+        got == n || error("$name line count $got != $n")
+    end
+
+    hidden = q88_decode.(readlines(joinpath(out_dir, "parameters_weights.mem")))
+    if !(minimum(hidden) < 0 < maximum(hidden))
+        error("hidden Q8.8 is not mixed-sign (min=$(minimum(hidden)) max=$(maximum(hidden)))")
+    end
+
+    outw = q88_decode.(readlines(joinpath(out_dir, "parameters_output_weights.mem")))
+    for i in 1:N_EXC
+        col = view(outw, ((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS))
+        all(>=(0), col) || error("excitatory readout column $i is not Dale ≥ 0")
+    end
+    for i in INHIB_ROWS
+        col = view(outw, ((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS))
+        all(<=(0), col) || error("inhibitory readout column $i is not Dale ≤ 0")
+    end
+
+    model = JSON3.read(read(joinpath(out_dir, "snn_model.json"), String))
+    String(model.q88) == "signed" || error("snn_model.json q88 is not signed")
+    String(model.dale) == "outgoing" || error("snn_model.json dale is not outgoing")
+    String(model.ei_ratio) == "80:20" || error("snn_model.json ei_ratio is not 80:20")
+    n_inh = count(n -> n.inhibitory === true, model.neurons)
+    n_inh == N_INHIB || error("snn_model.json inhibitory count $n_inh != $N_INHIB")
+    return true
 end
 
 """
@@ -1034,7 +1100,7 @@ function main(args=ARGS)
     println("Split  : $split  (train gpu-000000..138 / val 140..168 / test 170..198; embargo 139,169)")
     println("Live   : mem_util_pct, power_w, gpu_temp_c, sm_clock_mhz, mem_clock_mhz")
     println("Scale  : frozen train minmax lineage=$FROZEN_LINEAGE; axons 5..15 unused=0")
-    println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory (outgoing readout); incoming W unsigned")
+    println("Dale   : $N_EXC excitatory / $N_INHIB inhibitory (outgoing readout); incoming W signed-capable (no Dale lock)")
     println("K-WTA  : train k=$K_WTA (I_WTA_MAX=$I_WTA_MAX E_WTA_MIN=$E_WTA_MIN); health eval k=none on test gpu-000170..198")
     println("Decay  : keep=$DECAY  (Rust leak = $(1 - DECAY))")
     println("Seed   : $seed")
@@ -1123,6 +1189,7 @@ function main(args=ARGS)
     end
 
     paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded), seed)
+    assert_signed_export(out_dir)
     println("\nExported:")
     for p in paths
         println("  $p")

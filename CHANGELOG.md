@@ -4,6 +4,8 @@
 
 ### Changed
 
+- `scripts/spikenaut_train.jl` / README: reconcile leftover Spikenaut-SNN#13 surfaces after #34. Incoming `W` banner no longer says “unsigned” (it is signed-capable with no Dale lock; Q8.8 stays two's-complement). Export now decodes written `.mem` files (`q88_decode` + `assert_signed_export`) so mixed-sign hidden + Dale 80:20 cannot pass by matching an unsigned encoder to itself. README records this script as the `merged_v2` *replacement source* without writing that tree or publishing HF.
+
 - Post-transfer hygiene (#27): live docs and package metadata point at [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl). README / AGENTS record that the GitHub wiki is enabled under rmems. The plasticity-lab boundary still links the live external peer [`Limen-Neural/plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (`rmems/plasticity-lab` does not exist).
 
 - `scripts/spikenaut_train.jl`: anti-clone / I-drive knobs from Spikenaut Scientist **exp-023** (seed 123 / 5 ep PASS: cofire 0.733, I live, 10 unique active Q8.8 of 12 active). `DIV_LR=0.00035`, `DIV_COS_MIN=0.55`, `I_DRIVE=0.05`, `I_THRESH=0.90`, `I_WTA_MAX=2`, `E_WTA_MIN=2`, `STDP_LTD=0.0008`, `RATE_TARGET=0.12`. LIVE_COLUMNS / FROZEN_MINMAX / episode holdout / health_eval k=none unchanged. Optional CLI seed (default 123). Does not write `merged_v2` or publish HF.
