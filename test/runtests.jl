@@ -35,6 +35,20 @@ end
         @test isdefined(SynapticDistill, :surrogate_exponential)
     end
 
+    @testset "post-transfer ownership docs (#27)" begin
+        root = dirname(@__DIR__)
+        readme = read(joinpath(root, "README.md"), String)
+        agents = read(joinpath(root, "AGENTS.md"), String)
+        project = read(joinpath(root, "Project.toml"), String)
+        @test occursin("https://github.com/rmems/SynapticDistill.jl", readme)
+        @test occursin("https://github.com/rmems/SynapticDistill.jl", agents)
+        @test occursin("https://github.com/rmems/SynapticDistill.jl", project)
+        @test !occursin("https://github.com/Limen-Neural/SynapticDistill.jl", readme)
+        @test occursin("https://github.com/Limen-Neural/plasticity-lab", readme)
+        @test occursin("rmems/plasticity-lab does not exist", readme)
+        @test occursin("rmems/SynapticDistill.jl/wiki", readme)
+    end
+
     @testset "surrogate gradients" begin
         # heaviside surrogate: at threshold → γ (10.0 default)
         @test surrogate_heaviside(0.0f0) ≈ 10.0f0 atol=0.01f0

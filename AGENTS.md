@@ -6,6 +6,8 @@
 
 - **Language:** Julia (1.8+)
 - **Package name:** SynapticDistill
+- **Repository:** https://github.com/rmems/SynapticDistill.jl (transferred from Limen-Neural; old org URL redirects here)
+- **Wiki:** enabled under rmems — https://github.com/rmems/SynapticDistill.jl/wiki (remote `rmems/SynapticDistill.jl.wiki.git`)
 - **License:** Dual MIT (Massachusetts Institute of Technology) / Apache-2.0
 - **Key dependencies:** Zygote (automatic differentiation), MLUtils (machine learning utilities), LinearAlgebra
 
@@ -20,7 +22,7 @@
 
 **SynapticDistill does not own:**
 
-- Reward-modulated STDP (spike-timing-dependent plasticity) or Hebbian learning
+- Reward-modulated STDP (spike-timing-dependent plasticity) or Hebbian learning — that stays in the still-live external peer [`Limen-Neural/plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (`rmems/plasticity-lab` does not exist)
 - IPC (inter-process communication) wire protocol types
 - Domain-specific model architectures
 - Hardware-specific optimizations (unless generic)
