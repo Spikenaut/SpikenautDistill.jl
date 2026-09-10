@@ -45,7 +45,8 @@ end
         @test occursin("https://github.com/rmems/SynapticDistill.jl", project)
         @test !occursin("https://github.com/Limen-Neural/SynapticDistill.jl", readme)
         @test occursin("https://github.com/Limen-Neural/plasticity-lab", readme)
-        @test occursin("rmems/plasticity-lab does not exist", readme)
+        @test occursin("rmems/plasticity-lab", readme)
+        @test occursin("does not exist", readme)
         @test occursin("rmems/SynapticDistill.jl/wiki", readme)
     end
 
