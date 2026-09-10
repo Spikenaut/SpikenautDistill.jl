@@ -823,8 +823,8 @@ end
     q88_decode(hex) -> Float64
 
 Inverse of [`q88_signed`](@ref). Four hex digits as two's-complement Q8.8.
-Export tests must decode the *file* so an unsigned `clamp(..., 0, 65535)`
-writer cannot pass by matching itself.
+Export tests must decode the *file* so an unsigned 0–65535 Q8.8 writer
+cannot pass by matching itself.
 """
 function q88_decode(hex::AbstractString)
     token = strip(hex)

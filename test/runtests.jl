@@ -271,8 +271,9 @@ end
         @test occursin("snn_model.json", script_src)
         @test occursin("parameters_weights.mem", script_src)
         @test occursin("parameters_decay.mem", script_src)
-        # #13 smoking gun: unsigned Q8.8 clamp must not return.
-        @test !occursin(r"clamp\([^)]*0\s*,\s*65535", script_src)
+        # #13 smoking gun: the unsigned Q8.8 encoder must not return.
+        # Match the real call (`clamp(round(Int…, 0, 65535)`), not docs.
+        @test !occursin(r"clamp\(round\(Int[^;\n]*0\s*,\s*65535", script_src)
         @test !occursin("incoming W unsigned", script_src)
         @test occursin("q88_signed", script_src)
         @test occursin("q88_decode", script_src)
