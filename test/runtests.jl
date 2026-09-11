@@ -268,6 +268,24 @@ end
         @test occursin("74acdd0f", script_src)
         @test occursin("gpu-000000..138", script_src)
         @test occursin("parameters_output_weights.mem", script_src)
+        @test occursin("snn_model.json", script_src)
+        @test occursin("parameters_weights.mem", script_src)
+        @test occursin("parameters_decay.mem", script_src)
+        # #13 smoking gun: the unsigned Q8.8 encoder must not return.
+        # Match the real call (`clamp(round(Int…, 0, 65535)`), not docs.
+        @test !occursin(r"clamp\(round\(Int[^;\n]*0\s*,\s*65535", script_src)
+        @test !occursin("incoming W unsigned", script_src)
+        @test occursin("q88_signed", script_src)
+        @test occursin("q88_decode", script_src)
+        @test occursin("assert_signed_export", script_src)
+        @test occursin("MERGED_V2_FILES", script_src)
+        readme_src = read(joinpath(@__DIR__, "..", "README.md"), String)
+        @test occursin("merged_v2", readme_src)
+        @test occursin("replacement source", readme_src)
+        @test occursin("capability", readme_src)
+        @test occursin("not a claim", readme_src)
+        @test occursin("parameters_output_weights.mem", readme_src)
+        @test occursin("signed-capable", readme_src)
         # Encoder path must not *read* *_derived. The names may appear only
         # as forbidden-sensor refusals (exp-008).
         @test occursin("FORBIDDEN_SENSORS", script_src)
@@ -282,12 +300,33 @@ end
         include(joinpath(@__DIR__, "..", "scripts", "spikenaut_train.jl"))
 
         @testset "q88_signed two's complement" begin
+            @test W_MIN < 0
+            @test N_INHIB == 4
+            @test N_EXC == 12
+            @test EI_RATIO == "12:4"
+            @test MERGED_V2_LINE_COUNTS == (
+                MERGED_V2_FILES[2] => N_NEURONS,
+                MERGED_V2_FILES[3] => N_NEURONS * N_CHANNELS,
+                MERGED_V2_FILES[4] => N_NEURONS,
+                MERGED_V2_FILES[5] => N_NEURONS * N_OUTPUTS,
+            )
             @test q88_signed(0) == "0000"
             @test q88_signed(1) == "0100"
             @test q88_signed(0.75) == "00C0"
             @test q88_signed(-7 / 256) == "FFF9"
             @test q88_signed(-1) == "FF00"
             @test q88_signed(DECAY) == q88_signed(0.85f0)
+            # Independent decode — not "hex equals the same encoder".
+            @test q88_decode("0000") == 0
+            @test q88_decode("0100") == 1
+            @test q88_decode("00C0") == 0.75
+            @test q88_decode("FFF9") == -7 / 256
+            @test q88_decode("FF00") == -1
+            @test q88_decode(q88_signed(-7 / 256)) == -7 / 256
+            @test q88_decode(q88_signed(W_MIN)) == Float64(W_MIN)
+            # Unsigned clamp(round(v*256), 0, 65535) cannot emit FFF9.
+            @test uppercase(string(UInt16(clamp(round(Int, -7 / 256 * 256), 0, 65535)),
+                                   base=16, pad=4)) != "FFF9"
         end
 
         @testset "v3 state_telemetry encoder (exp-008..011)" begin
@@ -481,7 +520,7 @@ end
             # projection. Incoming weights carry no sign constraint, which is
             # what lets inhibitory neurons be driven to threshold at all.
             @test all(>=(0), bank.readout[:, 1:N_EXC])
-            @test all(<=(0), bank.readout[:, INHIB_ROWS])
+            @test all(<(0), bank.readout[:, INHIB_ROWS])
             @test DIV_LR == 0.00035f0
             @test DIV_COS_MIN == 0.55f0
             @test I_DRIVE == 0.05f0
@@ -539,11 +578,11 @@ end
             mktempdir() do dir
                 export_seed = 456
                 paths = export_artifacts(bank, dir, true, export_seed)
-                @test isfile(joinpath(dir, "parameters_output_weights.mem"))
-                @test countlines(joinpath(dir, "parameters_output_weights.mem")) == 48
-                @test countlines(joinpath(dir, "parameters_weights.mem")) == 256
-                @test countlines(joinpath(dir, "parameters.mem")) == 16
-                @test countlines(joinpath(dir, "parameters_decay.mem")) == 16
+                @test isfile(joinpath(dir, MERGED_V2_FILES[5]))
+                @test countlines(joinpath(dir, MERGED_V2_FILES[5])) == N_NEURONS * N_OUTPUTS
+                @test countlines(joinpath(dir, MERGED_V2_FILES[3])) == N_NEURONS * N_CHANNELS
+                @test countlines(joinpath(dir, MERGED_V2_FILES[2])) == N_NEURONS
+                @test countlines(joinpath(dir, MERGED_V2_FILES[4])) == N_NEURONS
                 # Keep-factor decay must stay 0.85 → 00D9 or 00DA (0.85*256=217.6).
                 decay_hex = strip(read(joinpath(dir, "parameters_decay.mem"), String))
                 @test occursin("00D9", decay_hex) || occursin("00DA", decay_hex)
@@ -569,7 +608,9 @@ end
                 @test q88_signed(-7 / 256) == "FFF9"
                 model_json = read(joinpath(dir, "snn_model.json"), String)
                 @test occursin("keep", model_json)
-                @test occursin("80:20", model_json)
+                @test occursin(EI_RATIO, model_json)
+                @test occursin("12:4", model_json)
+                @test !occursin("80:20", model_json)
                 @test occursin("outgoing", model_json)
                 @test occursin("v3_state_telemetry", model_json)
                 @test occursin("mem_util_pct", model_json)
@@ -592,6 +633,50 @@ end
                 @test Float32(knobs.STDP_LTD) == STDP_LTD
                 @test model.seed == export_seed
                 @test length(paths) == 5
+                @test basename.(collect(paths)) == collect(MERGED_V2_FILES)
+                @test assert_signed_export(dir)
+
+                hidden_q = q88_decode.(wlines)
+                @test minimum(hidden_q) < 0 < maximum(hidden_q)
+                @test any(parse(UInt16, h, base=16) >= 0x8000 for h in wlines)
+                out_q = q88_decode.(olines)
+                for i in 1:N_EXC
+                    @test all(>=(0), out_q[((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS)])
+                end
+                for i in INHIB_ROWS
+                    col = out_q[((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS)]
+                    @test all(<=(0), col)
+                    @test any(<(0), col)
+                    @test any(parse(UInt16, olines[(i - 1) * N_OUTPUTS + o], base=16) >= 0x8000
+                              for o in 1:N_OUTPUTS)
+                end
+            end
+
+            # All-zero I readout must fail — Dale ≤ 0 alone is not enough.
+            mktempdir() do dir
+                export_artifacts(bank, dir)
+                outw_path = joinpath(dir, MERGED_V2_FILES[5])
+                olines = readlines(outw_path)
+                for i in INHIB_ROWS
+                    for o in 1:N_OUTPUTS
+                        olines[(i - 1) * N_OUTPUTS + o] = "0000"
+                    end
+                end
+                write(outw_path, join(olines, '\n') * '\n')
+                @test_throws ErrorException assert_signed_export(dir)
+            end
+
+            # Missing JSON keys must raise the contract error, not MethodError.
+            mktempdir() do dir
+                export_artifacts(bank, dir)
+                json_path = joinpath(dir, MERGED_V2_FILES[1])
+                obj = JSON3.read(read(json_path, String))
+                d = Dict{Symbol, Any}(pairs(obj))
+                delete!(d, :q88)
+                open(json_path, "w") do io
+                    JSON3.write(io, d)
+                end
+                @test_throws ErrorException assert_signed_export(dir)
             end
 
             # Health eval is k=none: a strong drive can fire more than K_WTA.

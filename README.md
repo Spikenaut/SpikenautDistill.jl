@@ -119,9 +119,11 @@ Any function that takes that output and returns a scalar loss is a valid loss fu
 
 ## Spikenaut sidecar (`scripts/spikenaut_train.jl`)
 
-Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). This is the path that writes the 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` has no E/I sign. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes) and does not mutate the bank that `export_artifacts` serializes. CLI split must be **train** (default); `val` / `test` error instead of `tick!(learn=true)` on the holdout. A JSONL with no test episodes errors instead of silently evaluating train. JSON `null` on a live key still counts; the value encodes as 0 (T=0 stays 0).
+Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). When pointed at legal v3 `state_telemetry` JSONL, this script **can** train and export signed two's-complement Q8.8, outgoing Dale 12:4 (75:25; 4 I — informal “80:20” was Dale shorthand for the I count, not the ratio), and K-WTA. That is a **capability** of the sidecar, not a claim that `rmems/Spikenaut-SNN` `dataset/merged_v2/` has already been replaced, that Hamming / Spikenaut-SNN#4 is cleared, that Spikenaut-SNN#13 is closed, that Hugging Face was published, or that silicon weight-load is ready.
 
-**Anti-clone knobs** (Scientist exp-023; seed 123 / 5 ep PASS: cofire 0.733, I live, 10/12 unique active Q8.8): live-row cosine repulsion (`DIV_LR=0.00035`, `DIV_COS_MIN=0.55`), I-drive (`I_DRIVE=0.05`, `I_THRESH=0.90`), train K-WTA quota (`I_WTA_MAX=2`, `E_WTA_MIN=2`), milder LTD (`STDP_LTD=0.0008`), homeostatic thresh (`RATE_TARGET=0.12`). Optional CLI seed (default 123). Encoder / holdout / health_eval contract unchanged.
+A run writes a **local** 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files into the `out_dir` you pass. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` is **signed-capable** (`W_MIN < 0`) and has no Dale sign lock — "unsigned" would mean the old smoking-gun Q8.8 clamp, which this script does not use. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes) and does not mutate the bank that `export_artifacts` serializes. CLI split must be **train** (default); `val` / `test` error instead of `tick!(learn=true)` on the holdout. A JSONL with no test episodes errors instead of silently evaluating train. JSON `null` on a live key still counts; the value encodes as 0 (T=0 stays 0).
+
+**Anti-clone knobs** (Scientist exp-023 measured these on a 5-ep local run, seed 123: cofire 0.733, I live, 10/12 unique active Q8.8). The knobs are in this script: live-row cosine repulsion (`DIV_LR=0.00035`, `DIV_COS_MIN=0.55`), I-drive (`I_DRIVE=0.05`, `I_THRESH=0.90`), train K-WTA quota (`I_WTA_MAX=2`, `E_WTA_MIN=2`), milder LTD (`STDP_LTD=0.0008`), homeostatic thresh (`RATE_TARGET=0.12`). Optional CLI seed (default 123). Encoder / holdout / health_eval contract unchanged. That measurement is **not** a promoted `merged_v2` health-PASS.
 
 It trains on the **legal v3 `state_telemetry` encoder**, not `qubic_ticks_snn` `*_derived` columns (those are a closed form of `tick_rate`; Spikenaut Scientist exp-008, 0 mismatches / 27430). Pointing the sidecar at derived-only JSONL errors instead of silently training on forbidden sensors.
 
@@ -163,7 +165,17 @@ julia --project=scripts scripts/spikenaut_train.jl \
   5 /tmp/spikenaut-out train 123
 ```
 
-Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`. Do not export weights to Hugging Face and do not write `rmems/Spikenaut-SNN` `dataset/merged_v2/` from this path.
+Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to the Rust `Cargo.toml`.
+
+**`merged_v2` replacement source (capability, not done).** This script can write the five-file FPGA layout below to a local `out_dir`. A later health-PASS retrain *could* replace `rmems/Spikenaut-SNN` `dataset/merged_v2/` from those files. **None of that has happened from this path:** the sidecar does not write the Spikenaut-SNN tree, does not publish Hugging Face, does not load silicon, and does not overwrite `merged_v2`. Spikenaut-SNN#13 stays open. Promotion would be a separate Spikenaut-SNN PR after k=none test bars (exp-009 / exp-023). Do not treat the published ramp as this script's output.
+
+| file | count / role |
+| --- | --- |
+| `snn_model.json` | 16 neurons + encoder / Dale / signed-Q8.8 metadata |
+| `parameters.mem` | 16 thresholds |
+| `parameters_weights.mem` | 256 signed Q8.8 hidden (neuron-major) |
+| `parameters_decay.mem` | 16 keep factors (`0.85`) |
+| `parameters_output_weights.mem` | 48 signed Q8.8 readout (neuron-major, Dale 12:4) |
 
 Cite: **Spikenaut Scientist** · exp-008..023.
 
