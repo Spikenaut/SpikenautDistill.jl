@@ -3,7 +3,7 @@
 # spikenaut_train.jl — Spikenaut LIF Trainer (standalone sidecar)
 #
 # Loads temporal event-stream JSONL *or* v3 `state_telemetry` JSONL
-# (five live sensors). Runs LIF + outgoing Dale 80:20 + K-WTA +
+# (five live sensors). Runs LIF + outgoing Dale 12:4 (75:25) + K-WTA +
 # reward-modulated STDP / e-prop, then writes snn_model.json + signed
 # Q8.8 .mem files.
 #
@@ -54,7 +54,9 @@ const N_NEURONS    = 16
 const N_CHANNELS   = 16
 const N_OUTPUTS    = 3
 const N_INHIB      = 4
-const N_EXC        = N_NEURONS - N_INHIB          # 12 — Dale 80:20
+const N_EXC        = N_NEURONS - N_INHIB          # 12 — Dale 12:4 (75:25)
+const EI_RATIO     = "$(N_EXC):$(N_INHIB)"        # "12:4"; not informal 80:20
+const Q88_LSB      = 1f0 / 256                    # smallest |word| that survives Q8.8
 const INHIB_ROWS   = (N_EXC + 1):N_NEURONS        # 13:16
 const K_WTA        = 4
 const DECAY        = 0.85f0                       # keep factor, not leak
@@ -166,7 +168,9 @@ function init_readout()
             R[o, i] = abs(R[o, i])
         end
         for i in INHIB_ROWS
-            R[o, i] = -abs(R[o, i])
+            # Floor at one Q8.8 LSB so an I column cannot init as all-zero
+            # after quantization (assert_signed_export requires a < 0 word).
+            R[o, i] = -max(abs(R[o, i]), Q88_LSB)
         end
     end
     return R
@@ -844,10 +848,10 @@ const MERGED_V2_FILES = (
     "parameters_output_weights.mem",
 )
 const MERGED_V2_LINE_COUNTS = (
-    "parameters.mem" => 16,
-    "parameters_weights.mem" => 256,
-    "parameters_decay.mem" => 16,
-    "parameters_output_weights.mem" => 48,
+    MERGED_V2_FILES[2] => N_NEURONS,
+    MERGED_V2_FILES[3] => N_NEURONS * N_CHANNELS,
+    MERGED_V2_FILES[4] => N_NEURONS,
+    MERGED_V2_FILES[5] => N_NEURONS * N_OUTPUTS,
 )
 
 function write_mem(path, values)
@@ -876,7 +880,7 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString,
     model = Dict{String, Any}(
         "neurons"        => neurons_json,
         "source"         => "spikenaut_julia",
-        "ei_ratio"       => "80:20",
+        "ei_ratio"       => EI_RATIO,
         # E/I sign lives on each neuron's outgoing projection
         # (`output_weights`), not on its incoming `weights` row.
         "dale"           => "outgoing",
@@ -919,20 +923,21 @@ function export_artifacts(bank::LIFBank, out_dir::AbstractString,
             "embargo" => [139, 169],
         )
     end
-    open(joinpath(out_dir, "snn_model.json"), "w") do f
+    json_name, thresh_name, weights_name, decay_name, outw_name = MERGED_V2_FILES
+    open(joinpath(out_dir, json_name), "w") do f
         JSON3.write(f, model)
     end
 
-    write_mem(joinpath(out_dir, "parameters.mem"), bank.thresh)
+    write_mem(joinpath(out_dir, thresh_name), bank.thresh)
     # NOTE the chained `for i ... for ch ...`, not the comma form. A comma
     # generator is a cartesian product and iterates column-major (i fastest),
     # which would silently reorder these memories; the nested `for` loop this
     # replaced varies the *last* index fastest. Verified byte-identical.
-    write_mem(joinpath(out_dir, "parameters_weights.mem"),
+    write_mem(joinpath(out_dir, weights_name),
               (bank.weights[i, ch] for i in 1:N_NEURONS for ch in 1:N_CHANNELS))
-    write_mem(joinpath(out_dir, "parameters_decay.mem"), bank.decay)
-    # 48 signed values, neuron-major: 16 neurons × 3 readout heads
-    write_mem(joinpath(out_dir, "parameters_output_weights.mem"),
+    write_mem(joinpath(out_dir, decay_name), bank.decay)
+    # N_NEURONS × N_OUTPUTS signed values, neuron-major
+    write_mem(joinpath(out_dir, outw_name),
               (bank.readout[o, i] for i in 1:N_NEURONS for o in 1:N_OUTPUTS))
 
     return ntuple(i -> joinpath(out_dir, MERGED_V2_FILES[i]), length(MERGED_V2_FILES))
@@ -942,11 +947,14 @@ end
     assert_signed_export(out_dir) -> Bool
 
 Spikenaut-SNN#13 sidecar contract on **written files** (not the in-memory
-bank): `merged_v2` filenames + counts, mixed-sign hidden Q8.8, Dale 80:20
-on decoded output weights, JSON `q88=signed`. Call after a train export.
+bank): `merged_v2` filenames + counts, mixed-sign hidden Q8.8, Dale $EI_RATIO
+on decoded output weights (each I column has a strictly negative word),
+JSON `q88=signed`. Call after a train export. Fail-loud: a failed assert
+leaves dirty files in `out_dir` so silence cannot be treated as success.
 Does not write `Spikenaut-SNN/dataset/merged_v2/`.
 """
 function assert_signed_export(out_dir::AbstractString)
+    json_name, _, weights_name, _, outw_name = MERGED_V2_FILES
     for name in MERGED_V2_FILES
         isfile(joinpath(out_dir, name)) || error("merged_v2 export missing $name")
     end
@@ -955,12 +963,14 @@ function assert_signed_export(out_dir::AbstractString)
         got == n || error("$name line count $got != $n")
     end
 
-    hidden = q88_decode.(readlines(joinpath(out_dir, "parameters_weights.mem")))
+    # Fail-loud after write is intentional (promotion honesty). A failed
+    # run leaves dirty files in out_dir; do not soften this to a warning.
+    hidden = q88_decode.(readlines(joinpath(out_dir, weights_name)))
     if !(minimum(hidden) < 0 < maximum(hidden))
         error("hidden Q8.8 is not mixed-sign (min=$(minimum(hidden)) max=$(maximum(hidden)))")
     end
 
-    outw = q88_decode.(readlines(joinpath(out_dir, "parameters_output_weights.mem")))
+    outw = q88_decode.(readlines(joinpath(out_dir, outw_name)))
     for i in 1:N_EXC
         col = view(outw, ((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS))
         all(>=(0), col) || error("excitatory readout column $i is not Dale ≥ 0")
@@ -968,12 +978,16 @@ function assert_signed_export(out_dir::AbstractString)
     for i in INHIB_ROWS
         col = view(outw, ((i - 1) * N_OUTPUTS + 1):(i * N_OUTPUTS))
         all(<=(0), col) || error("inhibitory readout column $i is not Dale ≤ 0")
+        any(<(0), col) || error("inhibitory readout column $i has no strictly negative word")
     end
 
-    model = JSON3.read(read(joinpath(out_dir, "snn_model.json"), String))
-    String(model.q88) == "signed" || error("snn_model.json q88 is not signed")
-    String(model.dale) == "outgoing" || error("snn_model.json dale is not outgoing")
-    String(model.ei_ratio) == "80:20" || error("snn_model.json ei_ratio is not 80:20")
+    model = JSON3.read(read(joinpath(out_dir, json_name), String))
+    # get(...) == value, not String(model.field): a missing key is `missing`
+    # and `String(missing)` is a MethodError; `missing || error(...)` is a
+    # TypeError. `nothing == "signed"` is false and takes the error branch.
+    get(model, :q88, nothing) == "signed" || error("snn_model.json q88 is not signed")
+    get(model, :dale, nothing) == "outgoing" || error("snn_model.json dale is not outgoing")
+    get(model, :ei_ratio, nothing) == EI_RATIO || error("snn_model.json ei_ratio is not $EI_RATIO")
     n_inh = count(n -> n.inhibitory === true, model.neurons)
     n_inh == N_INHIB || error("snn_model.json inhibitory count $n_inh != $N_INHIB")
     return true
@@ -1189,6 +1203,7 @@ function main(args=ARGS)
     end
 
     paths = export_artifacts(bank, out_dir, any(is_state_telemetry, loaded), seed)
+    # Fail-loud after write: dirty out_dir on failure is intentional.
     assert_signed_export(out_dir)
     println("\nExported:")
     for p in paths

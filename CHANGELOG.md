@@ -4,9 +4,11 @@
 
 ### Changed
 
+- `scripts/spikenaut_train.jl`: `ei_ratio` / assert / README now say Dale **12:4** (75:25, `N_INHIB=4`), not informal “80:20”. `assert_signed_export` requires each I readout column to have a strictly negative Q8.8 word (all-zero I fails). Write paths and line counts come from `MERGED_V2_FILES` / `N_NEURONS` / `N_CHANNELS` / `N_OUTPUTS`. Missing JSON keys use `get(...) == value` so the contract error fires instead of `MethodError`. Fail-loud after write is kept (dirty `out_dir` on failure).
+
 - README: sidecar signed Q8.8 / Dale / K-WTA is a **capability** of `scripts/spikenaut_train.jl` when run on legal v3 JSONL — not a claim that `dataset/merged_v2/` was replaced, that Hamming / Spikenaut-SNN#4 or #13 closed, or that HF / silicon happened.
 
-- `scripts/spikenaut_train.jl` / README: reconcile leftover Spikenaut-SNN#13 surfaces after #34. Incoming `W` banner no longer says “unsigned” (it is signed-capable with no Dale lock; Q8.8 stays two's-complement). Export now decodes written `.mem` files (`q88_decode` + `assert_signed_export`) so mixed-sign hidden + Dale 80:20 cannot pass by matching an unsigned encoder to itself. README records this script as a `merged_v2` *replacement source* (capability, not done).
+- `scripts/spikenaut_train.jl` / README: reconcile leftover Spikenaut-SNN#13 surfaces after #34. Incoming `W` banner no longer says “unsigned” (it is signed-capable with no Dale lock; Q8.8 stays two's-complement). Export now decodes written `.mem` files (`q88_decode` + `assert_signed_export`) so mixed-sign hidden + Dale 12:4 cannot pass by matching an unsigned encoder to itself. README records this script as a `merged_v2` *replacement source* (capability, not done).
 
 - Post-transfer hygiene (#27): live docs and package metadata point at [`rmems/SynapticDistill.jl`](https://github.com/rmems/SynapticDistill.jl). README / AGENTS record that the GitHub wiki is enabled under rmems. The plasticity-lab boundary still links the live external peer [`Limen-Neural/plasticity-lab`](https://github.com/Limen-Neural/plasticity-lab) (`rmems/plasticity-lab` does not exist).
 

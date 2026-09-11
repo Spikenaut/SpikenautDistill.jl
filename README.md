@@ -119,7 +119,7 @@ Any function that takes that output and returns a scalar loss is a valid loss fu
 
 ## Spikenaut sidecar (`scripts/spikenaut_train.jl`)
 
-Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). When pointed at legal v3 `state_telemetry` JSONL, this script **can** train and export signed two's-complement Q8.8, outgoing Dale 80:20, and K-WTA. That is a **capability** of the sidecar, not a claim that `rmems/Spikenaut-SNN` `dataset/merged_v2/` has already been replaced, that Hamming / Spikenaut-SNN#4 is cleared, that Spikenaut-SNN#13 is closed, that Hugging Face was published, or that silicon weight-load is ready.
+Standalone trainer (JSON3 + stdlib only — it does **not** `using SynapticDistill`). When pointed at legal v3 `state_telemetry` JSONL, this script **can** train and export signed two's-complement Q8.8, outgoing Dale 12:4 (75:25; 4 I — informal “80:20” was Dale shorthand for the I count, not the ratio), and K-WTA. That is a **capability** of the sidecar, not a claim that `rmems/Spikenaut-SNN` `dataset/merged_v2/` has already been replaced, that Hamming / Spikenaut-SNN#4 is cleared, that Spikenaut-SNN#13 is closed, that Hugging Face was published, or that silicon weight-load is ready.
 
 A run writes a **local** 16×16 LIF `snn_model.json` and signed Q8.8 `.mem` files into the `out_dir` you pass. Outgoing Dale (readout only) and K-WTA stay on during training; incoming `W` is **signed-capable** (`W_MIN < 0`) and has no Dale sign lock — "unsigned" would mean the old smoking-gun Q8.8 clamp, which this script does not use. Health evaluation is `k=none` on **test** `gpu-000170..198` (mean pairwise cofire, all-16, I spikes) and does not mutate the bank that `export_artifacts` serializes. CLI split must be **train** (default); `val` / `test` error instead of `tick!(learn=true)` on the holdout. A JSONL with no test episodes errors instead of silently evaluating train. JSON `null` on a live key still counts; the value encodes as 0 (T=0 stays 0).
 
@@ -175,7 +175,7 @@ Library `update_eprop!` / `update_ottt!` stay stubs; do not add this package to 
 | `parameters.mem` | 16 thresholds |
 | `parameters_weights.mem` | 256 signed Q8.8 hidden (neuron-major) |
 | `parameters_decay.mem` | 16 keep factors (`0.85`) |
-| `parameters_output_weights.mem` | 48 signed Q8.8 readout (neuron-major, Dale 80:20) |
+| `parameters_output_weights.mem` | 48 signed Q8.8 readout (neuron-major, Dale 12:4) |
 
 Cite: **Spikenaut Scientist** · exp-008..023.
 
