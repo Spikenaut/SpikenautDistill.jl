@@ -282,6 +282,8 @@ end
         readme_src = read(joinpath(@__DIR__, "..", "README.md"), String)
         @test occursin("merged_v2", readme_src)
         @test occursin("replacement source", readme_src)
+        @test occursin("capability", readme_src)
+        @test occursin("not a claim", readme_src)
         @test occursin("parameters_output_weights.mem", readme_src)
         @test occursin("signed-capable", readme_src)
         # Encoder path must not *read* *_derived. The names may appear only
